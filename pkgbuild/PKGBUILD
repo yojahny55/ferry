@@ -1,5 +1,5 @@
 pkgname=ferry
-pkgver=0.1.1
+pkgver=0.2.0
 pkgrel=1
 pkgdesc='A keyboard-first file manager that follows the Omarchy theme'
 arch=('x86_64' 'aarch64')

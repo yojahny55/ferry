@@ -6,6 +6,8 @@ All notable changes to Ferry are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-23
+
 ### Added
 
 - A built-in text editor and viewer. Text files (notes, Markdown, code, configs) open inside
@@ -75,6 +77,7 @@ The first release.
 - Background folder loading, so slow or unreachable network mounts never freeze the window.
 - `FERRY_DEBUG=1` logging for drags, thumbnails and settings.
 
-[Unreleased]: https://github.com/yojahny55/ferry/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/yojahny55/ferry/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/yojahny55/ferry/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/yojahny55/ferry/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/yojahny55/ferry/releases/tag/v0.1.0
