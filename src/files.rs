@@ -405,6 +405,10 @@ pub fn kind(entry: &Entry) -> Kind {
     if entry.is_dir {
         return Kind::Folder;
     }
+    // Everything bsdtar can open, compound suffixes (.tar.zst) and single files (.gz) included.
+    if crate::archive::kind(&entry.name).is_some() {
+        return Kind::Archive;
+    }
     let ext = entry
         .name
         .rsplit_once('.')

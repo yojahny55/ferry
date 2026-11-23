@@ -49,6 +49,18 @@ enum Dialog {
         fs: usize,
         label: String,
     },
+    /// Opening an archive: what's inside (read in the background), and where to put it.
+    Extract {
+        path: PathBuf,
+        listing: Option<Result<Vec<String>, String>>,
+    },
+    /// Compressing: the archive's name and format (an index into `archive::formats()`).
+    Compress {
+        paths: Vec<PathBuf>,
+        name: String,
+        fs: usize,
+        error: Option<String>,
+    },
     /// Closing the editor (or quitting, when `quit`) with unsaved changes.
     Unsaved {
         quit: bool,
@@ -91,6 +103,12 @@ enum Action {
     Unmount(Device),
     Eject(Device),
     AskFormat(Device),
+    /// Extract archives beside themselves; `into_folder` always makes a folder for each.
+    Extract {
+        paths: Vec<PathBuf>,
+        into_folder: bool,
+    },
+    AskCompress,
     Copy,
     Cut,
     Paste,
@@ -145,6 +163,11 @@ enum Loaded {
     },
     /// A fresh look at the drives and shares.
     Devices(Vec<Device>),
+    /// What's inside an archive, for the Extract dialog.
+    Listing {
+        path: PathBuf,
+        result: Result<Vec<String>, String>,
+    },
     /// A drive finished mounting; open it.
     Mounted(Result<PathBuf, String>),
     /// The editor's save finished; `text` is what was saved.
@@ -225,6 +248,8 @@ pub struct App {
     opacity: Option<f32>,
     /// The size slider's value while it's being dragged.
     scale_edit: Option<f32>,
+    /// The format last used to compress, offered first next time.
+    compress_format: usize,
 
     filter: String,
     focus_filter: bool,
@@ -306,6 +331,7 @@ impl App {
             ui_scale: None,
             opacity: None,
             scale_edit: None,
+            compress_format: 0,
 
             filter: String::new(),
             focus_filter: false,
@@ -870,13 +896,33 @@ impl App {
         }
     }
 
-    /// Text in the built-in editor, everything else in its default app.
+    /// Archives offer to extract, text opens in the built-in editor, everything else in its
+    /// default app.
     fn open_file(&mut self, path: PathBuf) {
-        if crate::editor::wants(self.thumbs.mime_for(&path)) {
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        if crate::archive::kind(&name).is_some() {
+            self.ask_extract(path);
+        } else if crate::editor::wants(self.thumbs.mime_for(&path)) {
             self.open_editor(path, false);
         } else {
             self.open_external(path);
         }
+    }
+
+    fn ask_extract(&mut self, path: PathBuf) {
+        self.dialog = Some(Dialog::Extract {
+            path: path.clone(),
+            listing: None,
+        });
+        let (tx, ctx) = (self.load_tx.clone(), self.ctx.clone());
+        std::thread::spawn(move || {
+            let result = crate::archive::list(&path);
+            let _ = tx.send(Loaded::Listing { path, result });
+            ctx.request_repaint();
+        });
     }
 
     fn open_external(&mut self, path: PathBuf) {
@@ -1533,6 +1579,38 @@ impl App {
                 self.job(tr("Ejecting %1…").replace("%1", &name), move || {
                     devices::eject(&d).map(|_| tr("You can unplug %1 now").replace("%1", &name))
                 });
+            }
+            Action::Extract { paths, into_folder } => {
+                let Some(first) = paths.first() else { return };
+                let name = first
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                let n = paths.len();
+                self.job(tr("Extracting %1…").replace("%1", &name), move || {
+                    let mut made = Vec::new();
+                    for path in &paths {
+                        let dir = path.parent().map(PathBuf::from).unwrap_or_default();
+                        made.push(crate::archive::extract(path, &dir, into_folder)?);
+                    }
+                    Ok(match &made[..] {
+                        [one] => tr("Extracted to %1")
+                            .replace("%1", &one.file_name().unwrap_or_default().to_string_lossy()),
+                        _ => trn("Extracted %n archives", n),
+                    })
+                });
+            }
+            Action::AskCompress => {
+                let paths = self.targets();
+                if !paths.is_empty() {
+                    let name = crate::archive::suggested_name(&paths, &self.cwd);
+                    self.dialog = Some(Dialog::Compress {
+                        paths,
+                        name,
+                        fs: self.compress_format,
+                        error: None,
+                    });
+                }
             }
             Action::AskFormat(d) => {
                 if devices::formats().is_empty() {
@@ -2680,6 +2758,29 @@ impl App {
                 self.pending.push(action);
             }
         }
+        ui.separator();
+        let targets = self.targets();
+        let archives = !targets.is_empty()
+            && targets.iter().all(|p| {
+                crate::archive::kind(&p.file_name().unwrap_or_default().to_string_lossy()).is_some()
+            });
+        if archives {
+            if ui.button(tr("Extract Here")).clicked() {
+                self.pending.push(Action::Extract {
+                    paths: targets.clone(),
+                    into_folder: false,
+                });
+            }
+            if ui.button(tr("Extract to Folder")).clicked() {
+                self.pending.push(Action::Extract {
+                    paths: targets.clone(),
+                    into_folder: true,
+                });
+            }
+        }
+        if ui.button(tr("Compress…")).clicked() {
+            self.pending.push(Action::AskCompress);
+        }
         let folders: Vec<PathBuf> = self
             .place_targets()
             .into_iter()
@@ -2757,6 +2858,8 @@ impl App {
         // Unsaved-changes answer: Some(Some(then)) saves first, Some(None) discards.
         let mut unsaved: Option<Option<AfterSave>> = None;
         let mut unsaved_quit = false;
+        // Extract answer: Some(into_folder).
+        let mut extract: Option<bool> = None;
         let frame = egui::Frame::popup(&ctx.global_style())
             .inner_margin(Margin::same(18))
             .fill(p.surface);
@@ -2770,6 +2873,7 @@ impl App {
                     Dialog::Rename { .. } => Some(tr("Rename")),
                     Dialog::NewFolder { .. } => Some(tr("New Folder")),
                     Dialog::NewFile { .. } => Some(tr("New Text File")),
+                    Dialog::Compress { .. } => Some(tr("Compress")),
                     _ => None,
                 };
                 if let Some(title) = title {
@@ -2786,6 +2890,72 @@ impl App {
                                 .margin(Margin::symmetric(8, 6)),
                         );
                         edit.request_focus();
+                        if let Some(e) = error {
+                            ui.label(RichText::new(e.as_str()).color(p.red));
+                        }
+                        confirm = enter;
+                    }
+                    Dialog::Extract { path, listing } => {
+                        let name = path.file_name().unwrap_or_default().to_string_lossy();
+                        ui.label(RichText::new(name.as_ref()).size(16.0).color(p.bright));
+                        ui.add_space(4.0);
+                        match listing {
+                            None => {
+                                ui.horizontal(|ui| {
+                                    ui.spinner();
+                                    ui.label(RichText::new(tr("Reading the archive…")).color(p.dim));
+                                });
+                            }
+                            Some(Err(e)) => {
+                                ui.label(RichText::new(e.as_str()).color(p.red));
+                            }
+                            Some(Ok(names)) => {
+                                ui.label(RichText::new(trn("%n items inside", names.len())).color(p.dim));
+                                ui.add_space(2.0);
+                                for n in names.iter().take(10) {
+                                    ui.label(RichText::new(n.as_str()).color(p.fg));
+                                }
+                                if names.len() > 10 {
+                                    ui.label(
+                                        RichText::new(
+                                            tr("…and %1 more").replace("%1", &(names.len() - 10).to_string()),
+                                        )
+                                        .color(p.dim),
+                                    );
+                                }
+                            }
+                        }
+                        ui.add_space(10.0);
+                        let ready = matches!(listing, Some(Ok(_)));
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            let here = egui::Button::new(
+                                RichText::new(tr("Extract Here")).color(crate::theme::on(p.accent)),
+                            )
+                            .fill(p.accent);
+                            if ui.add_enabled(ready, here).clicked() || (enter && ready) {
+                                extract = Some(false);
+                            }
+                            if ui.add_enabled(ready, egui::Button::new(tr("Extract to Folder"))).clicked() {
+                                extract = Some(true);
+                            }
+                            if ui.button(tr("Cancel")).clicked() {
+                                close = true;
+                            }
+                        });
+                    }
+                    Dialog::Compress { name, fs, error, paths } => {
+                        ui.label(RichText::new(trn("%n items", paths.len())).color(p.dim));
+                        ui.add_space(4.0);
+                        let edit = ui.add(
+                            TextEdit::singleline(name)
+                                .desired_width(f32::INFINITY)
+                                .margin(Margin::symmetric(8, 6)),
+                        );
+                        edit.request_focus();
+                        ui.add_space(6.0);
+                        for (i, (_, what)) in crate::archive::formats().iter().enumerate() {
+                            ui.radio_value(fs, i, what.as_str());
+                        }
                         if let Some(e) = error {
                             ui.label(RichText::new(e.as_str()).color(p.red));
                         }
@@ -2880,7 +3050,7 @@ impl App {
                         ui.label(RichText::new(tr("Another program saved it after you opened it here. Overwrite its changes with yours?")).color(p.fg));
                     }
                 }
-                if !matches!(dialog, Dialog::Help | Dialog::Unsaved { .. }) {
+                if !matches!(dialog, Dialog::Help | Dialog::Unsaved { .. } | Dialog::Extract { .. }) {
                     ui.add_space(10.0);
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         let label = match dialog {
@@ -2888,6 +3058,7 @@ impl App {
                             Dialog::NewFolder { .. } | Dialog::NewFile { .. } => tr("Create"),
                             Dialog::ChangedOnDisk => tr("Overwrite"),
                             Dialog::Format { .. } => tr("Format"),
+                            Dialog::Compress { .. } => tr("Compress"),
                             _ => tr("Delete"),
                         };
                         let fill = if matches!(
@@ -2915,6 +3086,15 @@ impl App {
                     });
                 }
             });
+        if let Some(into_folder) = extract
+            && let Some(Dialog::Extract { path, .. }) = self.dialog.take()
+        {
+            self.pending.push(Action::Extract {
+                paths: vec![path],
+                into_folder,
+            });
+            return;
+        }
         if close {
             if matches!(self.dialog, Some(Dialog::ChangedOnDisk)) {
                 self.after_save = None;
@@ -3010,6 +3190,36 @@ impl App {
                 });
             }
             Some(Dialog::ChangedOnDisk) => self.save_editor(true),
+            Some(Dialog::Compress {
+                paths, name, fs, ..
+            }) => {
+                let name = name.trim().to_string();
+                if name.is_empty() || name.contains('/') || name == "." || name == ".." {
+                    self.dialog = Some(Dialog::Compress {
+                        paths,
+                        name,
+                        fs,
+                        error: Some(tr("Give the archive a name, without /")),
+                    });
+                    return;
+                }
+                let Some((ext, _)) = crate::archive::formats().get(fs).cloned() else {
+                    return;
+                };
+                self.compress_format = fs;
+                let dir = self.cwd.clone();
+                self.job(
+                    tr("Compressing into %1…").replace("%1", &format!("{name}.{ext}")),
+                    move || {
+                        crate::archive::compress(&paths, &dir, &name, ext).map(|made| {
+                            tr("Created %1").replace(
+                                "%1",
+                                &made.file_name().unwrap_or_default().to_string_lossy(),
+                            )
+                        })
+                    },
+                );
+            }
             Some(Dialog::Format { device, fs, label }) => {
                 let Some((fstype, _)) = devices::formats().get(fs).cloned() else {
                     return;
@@ -3027,7 +3237,10 @@ impl App {
                         .map(|_| tr("Formatted %1").replace("%1", &name))
                 });
             }
-            Some(Dialog::Help) | Some(Dialog::Unsaved { .. }) | None => {}
+            Some(Dialog::Help)
+            | Some(Dialog::Unsaved { .. })
+            | Some(Dialog::Extract { .. })
+            | None => {}
         }
     }
 
@@ -3046,6 +3259,16 @@ impl App {
         while let Ok(loaded) = self.load_rx.try_recv() {
             match loaded {
                 Loaded::Dir(load) => self.loaded(load),
+                Loaded::Listing { path, result } => {
+                    if let Some(Dialog::Extract {
+                        path: shown,
+                        listing,
+                    }) = &mut self.dialog
+                        && *shown == path
+                    {
+                        *listing = Some(result);
+                    }
+                }
                 Loaded::Devices(list) => {
                     self.scanning_devices = false;
                     self.devices = list;
@@ -4182,5 +4405,68 @@ mod appearance_tests {
         follow.click();
         harness.run();
         harness.get_by_label("scale set: false");
+    }
+}
+
+#[cfg(test)]
+mod archive_tests {
+    use super::*;
+
+    fn settle(ctx: &egui::Context, app: &mut App) {
+        for _ in 0..40 {
+            std::thread::sleep(Duration::from_millis(10));
+            let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
+                app.poll(ui.ctx());
+                app.draw(ui);
+            });
+            out.textures_delta.clear();
+        }
+    }
+
+    #[test]
+    fn compress_then_open_and_extract() {
+        let dir = std::env::temp_dir().join(format!("ferry-arc-ui-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("trip")).unwrap();
+        std::fs::write(dir.join("trip/plan.md"), "# plan").unwrap();
+        let ctx = egui::Context::default();
+        let mut app = App::new(&ctx, dir.clone(), None);
+        settle(&ctx, &mut app);
+
+        // Compress the folder, as the dialog would with its suggested name and zip.
+        app.selected = [dir.join("trip")].into_iter().collect();
+        app.apply(Action::AskCompress);
+        assert!(matches!(&app.dialog, Some(Dialog::Compress { name, .. }) if name == "trip"));
+        app.confirm();
+        settle(&ctx, &mut app);
+        assert!(dir.join("trip.zip").exists());
+        assert!(
+            app.entries.iter().any(|e| e.name == "trip.zip"),
+            "the folder refreshed"
+        );
+
+        // Opening it shows what's inside before anything is written.
+        app.open_file(dir.join("trip.zip"));
+        settle(&ctx, &mut app);
+        let Some(Dialog::Extract {
+            listing: Some(Ok(names)),
+            ..
+        }) = &app.dialog
+        else {
+            panic!("no listing")
+        };
+        assert!(names.contains(&"trip/plan.md".to_string()));
+
+        // "trip" exists, so extracting makes "trip (1)" beside it.
+        app.dialog = None;
+        app.apply(Action::Extract {
+            paths: vec![dir.join("trip.zip")],
+            into_folder: false,
+        });
+        settle(&ctx, &mut app);
+        assert_eq!(
+            std::fs::read_to_string(dir.join("trip (1)/plan.md")).unwrap(),
+            "# plan"
+        );
     }
 }

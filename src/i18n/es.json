@@ -211,5 +211,33 @@
   "Follow Omarchy's window opacity": "Seguir la opacidad de ventanas de Omarchy",
   "Omarchy's windows are glassy now.": "Las ventanas de Omarchy son translúcidas ahora.",
   "Make Omarchy's windows glassy to see the desktop through Ferry.": "Haz translúcidas las ventanas de Omarchy para ver el escritorio a través de Ferry.",
-  "Appearance": "Apariencia"
+  "Appearance": "Apariencia",
+  "zip: opens anywhere": "zip: se abre en cualquier sistema",
+  "tar.zst: fast and small, for Linux": "tar.zst: rápido y pequeño, para Linux",
+  "tar.gz: the classic for Linux": "tar.gz: el clásico de Linux",
+  "tar.xz: smallest, slower": "tar.xz: el más pequeño, más lento",
+  "7z: small, for 7-Zip users": "7z: pequeño, para usuarios de 7-Zip",
+  "This archive is password-protected, which Ferry can't open yet.": "Este archivo comprimido tiene contraseña, y Ferry aún no puede abrirlo.",
+  "%1 isn't an archive Ferry knows": "%1 no es un archivo comprimido que Ferry conozca",
+  "Compress files from one folder at a time": "Comprime archivos de una sola carpeta a la vez",
+  "Archive": "Archivo comprimido",
+  "Extracting %1…": "Extrayendo %1…",
+  "Extracted to %1": "Extraído en %1",
+  "Extract Here": "Extraer aquí",
+  "Extract to Folder": "Extraer en una carpeta",
+  "Compress…": "Comprimir…",
+  "Compress": "Comprimir",
+  "Reading the archive…": "Leyendo el archivo comprimido…",
+  "…and %1 more": "…y %1 más",
+  "Give the archive a name, without /": "Ponle un nombre al archivo comprimido, sin /",
+  "Compressing into %1…": "Comprimiendo en %1…",
+  "Created %1": "%1 creado",
+  "Extracted %n archives": {
+    "one": "%n archivo extraído",
+    "other": "%n archivos extraídos"
+  },
+  "%n items inside": {
+    "one": "%n elemento dentro",
+    "other": "%n elementos dentro"
+  }
 }

@@ -58,6 +58,9 @@ background so a sleeping NAS never freezes the window, and the app starts instan
   shares from `/etc/fstab` or `/proc/mounts` go under *Network*, and are never touched until
   opened, so a sleeping NAS never stalls the sidebar.
 - **Drag files out** into other apps (a browser, a chat, another file manager) through native Wayland drag-and-drop.
+- **Compress and extract** zip, 7z, rar, tar.gz/zst/xz, iso and more, with nothing to install:
+  opening an archive shows what's inside first, and extracting never scatters files or
+  overwrites anything. *Compress…* makes zip, tar.zst, tar.gz, tar.xz or 7z.
 - **Safe file operations**: paste never overwrites (`name (1).ext`), Delete moves to the trash,
   and only Shift+Delete deletes, after asking.
 - **Never blocks on slow disks**: folder loading and change checks run in the background, so an
@@ -144,7 +147,7 @@ o.bind("SUPER + E", "File manager", { launch = "ferry" })
 ### Runtime dependencies
 
 Ferry uses tools Omarchy already ships: `gio` (trash), `xdg-open` (opening files),
-`coreutils` (`cp`, `mv`), `lsblk`, and `udisksctl` and `gdbus` (mounting, ejecting and
+`coreutils` (`cp`, `mv`), `bsdtar` (archives), `lsblk`, and `udisksctl` and `gdbus` (mounting, ejecting and
 formatting drives through UDisks; formatting asks for your password through the desktop's
 polkit agent). Formatting offers the filesystems whose `mkfs` is installed (`exfatprogs`,
 `dosfstools`, `e2fsprogs`, `ntfs-3g`). Optional: `xdg-terminal-exec` for *Open Terminal Here*, and the

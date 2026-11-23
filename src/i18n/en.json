@@ -50,5 +50,13 @@
   "%n results": {
     "one": "%n result",
     "other": "%n results"
+  },
+  "Extracted %n archives": {
+    "one": "Extracted %n archive",
+    "other": "Extracted %n archives"
+  },
+  "%n items inside": {
+    "one": "%n item inside",
+    "other": "%n items inside"
   }
 }

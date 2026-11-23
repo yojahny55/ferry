@@ -1,6 +1,7 @@
 // ferry — a keyboard-first file manager that follows the Omarchy theme.
 
 mod app;
+mod archive;
 mod devices;
 mod dnd;
 mod editor;
