@@ -2,3 +2,9 @@
 /pkgbuild/pkg/
 /pkgbuild/src/
 *.pkg.tar.*
+
+# makepkg leftovers when building aur/PKGBUILD in place
+/aur/*.tar.gz
+/aur/*.pkg.tar.zst
+/aur/src/
+/aur/pkg/
