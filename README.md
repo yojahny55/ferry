@@ -29,7 +29,12 @@ background so a sleeping NAS never freezes the window, and the app starts instan
 
 ## Features
 
-- **Follows the desktop, live**: theme colors, window rounding, font, and language, with no restart.
+- **Follows the desktop, live**: the whole Omarchy palette (light themes too), window rounding,
+  font, language, the desktop's text size (GTK's text scaling, so Ferry matches your other apps
+  on high-resolution screens), and Omarchy's window opacity: when windows are glassy, Ferry is
+  see-through like the terminals, with text kept crisp. Secondary text is nudged until it meets
+  WCAG AA contrast, since many themes' dark foregrounds are too faint to read.
+- **Appearance menu** (the sliders icon) to set size and transparency yourself instead.
 - **Details and icons views**, with sortable columns and natural ordering (`photo2` before `photo10`).
 - **Zoom** with Ctrl+wheel or Ctrl+±, kept separately for each view and remembered.
 - **Previews** of images, videos, PDFs and office files, read from and written to the shared
@@ -160,9 +165,11 @@ Press `?` in the app for this list.
 | --- | --- |
 | `~/.local/state/omarchy/current/theme/colors.toml` | Theme palette (read; Omarchy's yellow accent when absent) |
 | `~/.config/omarchy/language` | Interface language (read) |
+| `~/.local/state/omarchy/toggles/hypr/window-glassy.lua` | Whether Omarchy's windows are glassy (looked for) |
+| GNOME's `text-scaling-factor` (via `gsettings`) | Text size (read) |
 | `~/.config/gtk-3.0/bookmarks` | Bookmarks, shared with GTK apps (read and written; other entries are kept as they are) |
 | `~/.cache/thumbnails/` | Shared preview cache, per the freedesktop spec (read and written) |
-| `~/.config/ferry/settings.json` | View, zoom, sorting, hidden files (written) |
+| `~/.config/ferry/settings.json` | View, zoom, sorting, hidden files, size and transparency when set by hand (written) |
 | `/proc/mounts`, `/etc/fstab` | Mounted drives and network shares (read) |
 
 Ferry never changes Omarchy's or Hyprland's configuration.

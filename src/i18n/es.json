@@ -205,5 +205,11 @@
   "You can unplug %1 now": "Ya puedes desconectar %1",
   "No formatting tools are installed (exfatprogs, dosfstools or e2fsprogs).": "No hay herramientas de formateo instaladas (exfatprogs, dosfstools o e2fsprogs).",
   "Formatting %1…": "Formateando %1…",
-  "Formatted %1": "%1 formateado"
+  "Formatted %1": "%1 formateado",
+  "Follow the desktop's text size": "Seguir el tamaño de texto del escritorio",
+  "Transparency": "Transparencia",
+  "Follow Omarchy's window opacity": "Seguir la opacidad de ventanas de Omarchy",
+  "Omarchy's windows are glassy now.": "Las ventanas de Omarchy son translúcidas ahora.",
+  "Make Omarchy's windows glassy to see the desktop through Ferry.": "Haz translúcidas las ventanas de Omarchy para ver el escritorio a través de Ferry.",
+  "Appearance": "Apariencia"
 }

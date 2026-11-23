@@ -39,7 +39,9 @@ fn main() -> eframe::Result {
             .with_app_id("ferry")
             .with_title("Ferry")
             .with_inner_size([1100.0, 700.0])
-            .with_min_inner_size([640.0, 420.0]),
+            .with_min_inner_size([640.0, 420.0])
+            // See-through when Omarchy's windows are glassy; the panels paint the background.
+            .with_transparent(true),
         ..Default::default()
     };
     eframe::run_native(

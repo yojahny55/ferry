@@ -27,6 +27,17 @@ All notable changes to Ferry are documented here. The format follows
   *Format…* in their menu, through UDisks. Plugged-in drives that aren't mounted yet show too,
   and mount when opened. Drives without a label go by their size instead of their UUID.
 
+### Changed
+
+- Ferry follows the desktop's text size (GTK's `text-scaling-factor`), so on a high-resolution
+  screen it's as big as your other apps instead of tiny.
+- Glassy Omarchy windows make Ferry see-through, like the terminals: the background lets the
+  blurred desktop through while text and icons stay solid. Opaque and default windows stay solid.
+- An Appearance menu sets size and transparency by hand, saved between launches.
+- Secondary text, icons and section titles are made readable on every theme (WCAG AA, 4.5:1),
+  and the theme's `muted` color draws lines and tracks. Light themes get light controls.
+- Sidebar rows are taller, and the current place is a soft accent pill instead of a hard bar.
+
 ### Fixed
 
 - NFS and other network shares showed as USB drives. They now have their own *Network* section,

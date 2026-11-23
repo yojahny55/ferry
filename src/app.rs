@@ -20,6 +20,8 @@ use crate::search;
 use crate::theme::{Palette, Theme};
 
 const ROW: f32 = 28.0;
+/// Sidebar rows are a little taller than file rows: fewer, and aimed at more often.
+const PLACE_ROW: f32 = 32.0;
 /// Icon-view tile width at 100% zoom; the height follows from the icon and two lines of name.
 const TILE_WIDTH: f32 = 112.0;
 
@@ -217,6 +219,11 @@ pub struct App {
     zoom_list: f32,
     zoom_grid: f32,
     zoom_editor: f32,
+    /// Overall size; None follows the desktop's text scaling.
+    ui_scale: Option<f32>,
+    /// Background opacity; None follows Omarchy's window opacity setting.
+    opacity: Option<f32>,
+
     filter: String,
     focus_filter: bool,
     path_edit: Option<String>,
@@ -294,6 +301,9 @@ impl App {
             zoom_list: 1.0,
             zoom_grid: 1.0,
             zoom_editor: 1.0,
+            ui_scale: None,
+            opacity: None,
+
             filter: String::new(),
             focus_filter: false,
             path_edit: None,
@@ -348,6 +358,8 @@ impl App {
             self.zoom_list = zoom("zoom_list", 2.5).unwrap_or(self.zoom_list);
             self.zoom_grid = zoom("zoom_grid", 4.0).unwrap_or(self.zoom_grid);
             self.zoom_editor = zoom("zoom_editor", 3.0).unwrap_or(self.zoom_editor);
+            self.ui_scale = v["ui_scale"].as_f64().map(|z| z.clamp(0.75, 3.0) as f32);
+            self.opacity = v["opacity"].as_f64().map(|o| o.clamp(0.3, 1.0) as f32);
             self.ascending = v["ascending"].as_bool().unwrap_or(self.ascending);
             self.sort = match v["sort"].as_str() {
                 Some("size") => SortKey::Size,
@@ -375,6 +387,8 @@ impl App {
             "zoom_list": (self.zoom_list * 100.0).round() / 100.0,
             "zoom_grid": (self.zoom_grid * 100.0).round() / 100.0,
             "zoom_editor": (self.zoom_editor * 100.0).round() / 100.0,
+            "ui_scale": self.ui_scale.map(|z| (z * 100.0).round() / 100.0),
+            "opacity": self.opacity.map(|o| (o * 100.0).round() / 100.0),
             "sort": sort,
             "ascending": self.ascending,
         });
@@ -448,6 +462,76 @@ impl App {
 
     fn p(&self) -> Palette {
         self.theme.palette
+    }
+
+    /// How opaque the window's background is. Glassy Omarchy windows are see-through like its
+    /// terminals (0.65, over Hyprland's blur); text and icons always stay solid.
+    fn opacity(&self) -> f32 {
+        self.opacity
+            .unwrap_or(if self.theme.glassy() { 0.65 } else { 1.0 })
+    }
+
+    /// A background color at the window's opacity.
+    fn glass(&self, c: Color32) -> Color32 {
+        c.gamma_multiply(self.opacity())
+    }
+
+    /// Overall size: the desktop's text scaling, as GTK apps use, unless set in Appearance.
+    fn scale(&self) -> f32 {
+        self.ui_scale.unwrap_or(self.theme.text_scale())
+    }
+
+    /// The Appearance menu: size and transparency, following the desktop by default.
+    fn appearance(&mut self, ui: &mut Ui) {
+        let p = self.p();
+        ui.set_min_width(260.0);
+        ui.label(RichText::new(tr("Size")).color(p.dim).size(12.0));
+        let mut follow = self.ui_scale.is_none();
+        if ui
+            .checkbox(&mut follow, tr("Follow the desktop's text size"))
+            .changed()
+        {
+            self.ui_scale = (!follow).then(|| self.theme.text_scale());
+        }
+        let mut scale = self.scale() * 100.0;
+        let slider = egui::Slider::new(&mut scale, 75.0..=250.0)
+            .suffix("%")
+            .step_by(5.0);
+        // Dragging would rescale the slider under the pointer; the change lands on release.
+        let resp = ui.add_enabled(!follow, slider);
+        if resp.drag_stopped() || (resp.changed() && !resp.dragged()) {
+            self.ui_scale = Some(scale / 100.0);
+        }
+        ui.add_space(8.0);
+        ui.label(RichText::new(tr("Transparency")).color(p.dim).size(12.0));
+        let mut follow = self.opacity.is_none();
+        if ui
+            .checkbox(&mut follow, tr("Follow Omarchy's window opacity"))
+            .changed()
+        {
+            self.opacity = (!follow).then(|| self.opacity());
+        }
+        let mut opacity = self.opacity() * 100.0;
+        if ui
+            .add_enabled(
+                !follow,
+                egui::Slider::new(&mut opacity, 30.0..=100.0)
+                    .suffix("%")
+                    .step_by(5.0),
+            )
+            .changed()
+        {
+            self.opacity = Some(opacity / 100.0);
+        }
+        ui.label(
+            RichText::new(if self.theme.glassy() {
+                tr("Omarchy's windows are glassy now.")
+            } else {
+                tr("Make Omarchy's windows glassy to see the desktop through Ferry.")
+            })
+            .color(p.dim)
+            .size(12.0),
+        );
     }
 
     // ----- Folders -------------------------------------------------------------------------
@@ -1756,6 +1840,11 @@ impl App {
             ui.add_space(8.0);
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = 2.0;
+                ui.menu_button(RichText::new("\u{f1de}").size(15.0), |ui| {
+                    self.appearance(ui)
+                })
+                .response
+                .on_hover_text(tr("Appearance"));
                 if icon_toggle(ui, '\u{f00a}', self.grid, &tr("Icons (Ctrl+2)")).clicked() {
                     self.grid = true;
                 }
@@ -1821,7 +1910,7 @@ impl App {
     fn path_bar(&mut self, ui: &mut Ui, p: &Palette) {
         let r = self.theme.radius();
         let frame = egui::Frame::new()
-            .fill(p.sidebar)
+            .fill(self.glass(p.sidebar))
             .corner_radius(CornerRadius::same(r.min(6)))
             .inner_margin(Margin::symmetric(6, 2));
         let width = ui.available_width();
@@ -1989,19 +2078,10 @@ impl App {
         p: &Palette,
         removable: bool,
     ) {
-        let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), ROW), Sense::click());
+        let (rect, resp) =
+            ui.allocate_exact_size(vec2(ui.available_width(), PLACE_ROW), Sense::click());
         let current = self.cwd == path;
-        let r = CornerRadius::same(self.theme.radius().min(4));
-        if current {
-            ui.painter().rect_filled(rect, r, p.selection);
-            ui.painter().rect_filled(
-                Rect::from_min_size(rect.min, vec2(3.0, rect.height())),
-                0,
-                p.accent,
-            );
-        } else if resp.hovered() {
-            ui.painter().rect_filled(rect, r, p.surface);
-        }
+        paint_place(ui, rect, current, resp.hovered(), self.theme.radius(), p);
         let color = if current { p.bright } else { p.fg };
         ui.painter().text(
             rect.left_center() + vec2(14.0, 0.0),
@@ -2033,21 +2113,15 @@ impl App {
     /// be unplugged, and a menu with the rest.
     fn device_row(&mut self, ui: &mut Ui, d: &Device, p: &Palette) {
         let bar = d.fill();
-        let height = if bar.is_some() { ROW + 6.0 } else { ROW };
+        let height = if bar.is_some() {
+            PLACE_ROW + 6.0
+        } else {
+            PLACE_ROW
+        };
         let (rect, resp) =
             ui.allocate_exact_size(vec2(ui.available_width(), height), Sense::click());
         let current = d.mount.as_ref().is_some_and(|m| self.cwd.starts_with(m));
-        let r = CornerRadius::same(self.theme.radius().min(4));
-        if current {
-            ui.painter().rect_filled(rect, r, p.selection);
-            ui.painter().rect_filled(
-                Rect::from_min_size(rect.min, vec2(3.0, rect.height())),
-                0,
-                p.accent,
-            );
-        } else if resp.hovered() {
-            ui.painter().rect_filled(rect, r, p.surface);
-        }
+        paint_place(ui, rect, current, resp.hovered(), self.theme.radius(), p);
         let mounted = d.mount.is_some();
         let color = if current {
             p.bright
@@ -2056,7 +2130,7 @@ impl App {
         } else {
             p.dim
         };
-        let middle = rect.top() + ROW / 2.0;
+        let middle = rect.top() + PLACE_ROW / 2.0;
         ui.painter().text(
             egui::pos2(rect.left() + 14.0, middle),
             Align2::LEFT_CENTER,
@@ -2077,8 +2151,7 @@ impl App {
                 egui::pos2(rect.left() + 40.0, rect.bottom() - 7.0),
                 vec2(rect.width() - 52.0, 3.0),
             );
-            ui.painter()
-                .rect_filled(track, 2.0, p.surface.gamma_multiply(1.6));
+            ui.painter().rect_filled(track, 2.0, p.muted);
             let used = if fill >= 0.9 { p.red } else { p.accent };
             ui.painter().rect_filled(
                 Rect::from_min_size(track.min, vec2(track.width() * fill, track.height())),
@@ -2244,7 +2317,11 @@ impl App {
                 _ => tr("This folder is empty"),
             };
             ui.centered_and_justified(|ui| {
-                ui.label(RichText::new(message).color(p.dim).size(15.0))
+                ui.label(
+                    RichText::new(format!("\u{f07c}\n\n{message}"))
+                        .color(p.dim)
+                        .size(15.0),
+                )
             });
             return;
         }
@@ -2497,7 +2574,7 @@ impl App {
             ui.painter().rect_stroke(
                 rect.shrink(0.5),
                 r,
-                Stroke::new(1.0, p.accent.gamma_multiply(0.8)),
+                Stroke::new(1.0, p.accent.gamma_multiply(0.45)),
                 egui::StrokeKind::Inside,
             );
         }
@@ -2980,6 +3057,12 @@ impl App {
             }
         }
         let now = ctx.input(|i| i.time);
+        let opacity = self.opacity();
+        self.theme.set_opacity(ctx, opacity);
+        let scale = self.scale();
+        if (ctx.zoom_factor() - scale).abs() > 0.001 {
+            ctx.set_zoom_factor(scale);
+        }
         self.poll_search(ctx, now);
         if now - self.last_poll >= 1.0 {
             self.last_poll = now;
@@ -3027,6 +3110,10 @@ impl eframe::App for App {
         self.draw(ui);
     }
 
+    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
+        [0.0; 4]
+    }
+
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         // The window, and the Wayland connection the drag code shares, still exist here.
         if let Some(dnd) = &mut self.dnd {
@@ -3067,7 +3154,7 @@ impl App {
         Panel::top("toolbar")
             .frame(
                 egui::Frame::new()
-                    .fill(p.bg)
+                    .fill(self.glass(p.bg))
                     .inner_margin(Margin::symmetric(10, 8)),
             )
             .show_separator_line(false)
@@ -3075,7 +3162,7 @@ impl App {
         Panel::bottom("status")
             .frame(
                 egui::Frame::new()
-                    .fill(p.sidebar)
+                    .fill(self.glass(p.sidebar))
                     .inner_margin(Margin::symmetric(12, 5)),
             )
             .show_separator_line(false)
@@ -3083,8 +3170,8 @@ impl App {
         Panel::left("places")
             .frame(
                 egui::Frame::new()
-                    .fill(p.sidebar)
-                    .inner_margin(Margin::symmetric(8, 4)),
+                    .fill(self.glass(p.sidebar))
+                    .inner_margin(Margin::symmetric(10, 6)),
             )
             .resizable(true)
             .default_size(210.0)
@@ -3092,12 +3179,16 @@ impl App {
             .show_separator_line(false)
             .show(ui, |ui| self.sidebar(ui));
         egui::CentralPanel::no_frame()
-            .frame(egui::Frame::new().fill(p.bg).inner_margin(Margin {
-                left: 6,
-                right: 6,
-                top: 2,
-                bottom: 0,
-            }))
+            .frame(
+                egui::Frame::new()
+                    .fill(self.glass(p.bg))
+                    .inner_margin(Margin {
+                        left: 6,
+                        right: 6,
+                        top: 2,
+                        bottom: 0,
+                    }),
+            )
             .show(ui, |ui| {
                 if self.editor.is_some() {
                     self.editor_view(ui);
@@ -3669,9 +3760,25 @@ fn text_galley(
 }
 
 fn section(ui: &mut Ui, title: &str, p: &Palette) {
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        ui.add_space(6.0);
+        ui.label(RichText::new(title.to_uppercase()).size(11.0).color(p.dim));
+    });
     ui.add_space(2.0);
-    ui.label(RichText::new(title.to_uppercase()).size(11.0).color(p.dim));
-    ui.add_space(2.0);
+}
+
+/// Sidebar rows: hover lightens; the current place is a soft accent pill, as in libadwaita's
+/// navigation sidebars, rather than a hard bar.
+fn paint_place(ui: &Ui, rect: Rect, current: bool, hovered: bool, radius: u8, p: &Palette) {
+    let r = CornerRadius::same(radius.min(6));
+    if current {
+        ui.painter()
+            .rect_filled(rect, r, p.accent.gamma_multiply(0.18));
+    } else if hovered {
+        ui.painter()
+            .rect_filled(rect, r, p.surface.gamma_multiply(0.8));
+    }
 }
 
 fn icon_button(ui: &mut Ui, icon: char, enabled: bool, tip: &str) -> egui::Response {
