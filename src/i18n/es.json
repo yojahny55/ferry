@@ -121,5 +121,25 @@
     "other": "%n carpetas añadidas a marcadores"
   },
   "Zoom": "Zoom",
-  "Reset zoom (Ctrl+0)": "Restablecer zoom (Ctrl+0)"
+  "Reset zoom (Ctrl+0)": "Restablecer zoom (Ctrl+0)",
+  "Open in Text Editor": "Abrir en el editor de texto",
+  "Open With Default App": "Abrir con la aplicación predeterminada",
+  "Back to the folder (Esc)": "Volver a la carpeta (Esc)",
+  "Unsaved changes": "Cambios sin guardar",
+  "Read-only": "Solo lectura",
+  "Save": "Guardar",
+  "Saved %1": "%1 guardado",
+  "Save changes to %1?": "¿Guardar los cambios en %1?",
+  "Your changes will be lost if you don't save them.": "Si no los guardas, perderás los cambios.",
+  "Don't Save": "No guardar",
+  "%1 changed on disk": "%1 cambió en el disco",
+  "Another program saved it after you opened it here. Overwrite its changes with yours?": "Otro programa lo guardó después de que lo abrieras aquí. ¿Sobrescribir sus cambios con los tuyos?",
+  "Overwrite": "Sobrescribir",
+  "Not UTF-8 text, so it opens read-only": "No es texto UTF-8, así que se abre en solo lectura",
+  "Can't open this file as text": "Este archivo no se puede abrir como texto",
+  "Save or close the file being edited first": "Primero guarda o cierra el archivo que estás editando",
+  "Too large to edit here; opening it with the default app": "Es demasiado grande para editarlo aquí; se abre con la aplicación predeterminada",
+  "Not a text file; opening it with the default app": "No es un archivo de texto; se abre con la aplicación predeterminada",
+  "Save (in the text editor)": "Guardar (en el editor de texto)",
+  "Close the text editor": "Cerrar el editor de texto"
 }

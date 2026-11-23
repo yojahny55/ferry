@@ -6,6 +6,16 @@ All notable changes to Ferry are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- A built-in text editor and viewer. Text files (notes, Markdown, code, configs) open inside
+  Ferry with line numbers, undo and zoom; Ctrl+S saves, Esc or Ctrl+W goes back to the folder.
+  Saving writes beside the file and renames it into place, keeps permissions and symlinks, and
+  asks before overwriting changes made by another program. Closing or quitting with unsaved
+  changes asks first. Files that aren't valid UTF-8 open read-only; binary files and files over
+  5 MiB open in the default app.
+- *Open in Text Editor* and *Open With Default App* in the file context menu.
+
 ## [0.1.1] - 2026-11-23
 
 ### Fixed

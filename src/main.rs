@@ -2,6 +2,7 @@
 
 mod app;
 mod dnd;
+mod editor;
 mod files;
 mod i18n;
 mod theme;

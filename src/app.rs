@@ -35,6 +35,19 @@ enum Dialog {
         paths: Vec<PathBuf>,
     },
     Help,
+    /// Closing the editor (or quitting, when `quit`) with unsaved changes.
+    Unsaved {
+        quit: bool,
+    },
+    /// The file changed on disk after it was opened in the editor.
+    ChangedOnDisk,
+}
+
+/// What to do once the editor's save finishes.
+#[derive(Clone, Copy, PartialEq)]
+enum AfterSave {
+    Close,
+    Quit,
 }
 
 enum Action {
@@ -58,6 +71,12 @@ enum Action {
     SelectAll,
     AddPlaces(Vec<PathBuf>),
     RemovePlace(PathBuf),
+    /// Open in the built-in editor even if the file's type says otherwise.
+    EditText(PathBuf),
+    OpenExternal(PathBuf),
+    CloseEditor,
+    /// Save the editor; `true` overwrites changes made on disk since it was opened.
+    SaveEditor(bool),
 }
 
 /// What is being dragged out of the folder view; `folders` is known from the listing, so the
@@ -86,6 +105,18 @@ enum Loaded {
         path: PathBuf,
         mtime: Option<SystemTime>,
         free: Option<u64>,
+    },
+    /// A file read for the editor; `forced` when asked for with "Open in Text Editor".
+    Text {
+        path: PathBuf,
+        forced: bool,
+        result: std::io::Result<(crate::editor::Opened, Option<SystemTime>)>,
+    },
+    /// The editor's save finished; `text` is what was saved.
+    Saved {
+        path: PathBuf,
+        text: String,
+        result: Result<Option<SystemTime>, crate::editor::SaveError>,
     },
 }
 
@@ -125,6 +156,7 @@ pub struct App {
     grid: bool,
     zoom_list: f32,
     zoom_grid: f32,
+    zoom_editor: f32,
     filter: String,
     focus_filter: bool,
     path_edit: Option<String>,
@@ -155,6 +187,11 @@ pub struct App {
     /// Where settings are kept, and what was last written there; tests run without one.
     settings_file: Option<PathBuf>,
     saved_settings: String,
+    editor: Option<crate::editor::Editor>,
+    focus_editor: bool,
+    after_save: Option<AfterSave>,
+    /// Set once quitting has been confirmed, so the close request goes through.
+    allow_close: bool,
 }
 
 impl App {
@@ -185,6 +222,7 @@ impl App {
             grid: false,
             zoom_list: 1.0,
             zoom_grid: 1.0,
+            zoom_editor: 1.0,
             filter: String::new(),
             focus_filter: false,
             path_edit: None,
@@ -211,6 +249,10 @@ impl App {
             thumbs: crate::thumbs::Thumbs::new(ctx),
             settings_file: None,
             saved_settings: String::new(),
+            editor: None,
+            focus_editor: false,
+            after_save: None,
+            allow_close: false,
         };
         ctx.options_mut(|o| o.zoom_with_keyboard = false);
         app.go(start, select, false);
@@ -227,6 +269,7 @@ impl App {
             self.show_hidden = v["show_hidden"].as_bool().unwrap_or(self.show_hidden);
             self.zoom_list = zoom("zoom_list", 2.5).unwrap_or(self.zoom_list);
             self.zoom_grid = zoom("zoom_grid", 4.0).unwrap_or(self.zoom_grid);
+            self.zoom_editor = zoom("zoom_editor", 3.0).unwrap_or(self.zoom_editor);
             self.ascending = v["ascending"].as_bool().unwrap_or(self.ascending);
             self.sort = match v["sort"].as_str() {
                 Some("size") => SortKey::Size,
@@ -253,6 +296,7 @@ impl App {
             "show_hidden": self.show_hidden,
             "zoom_list": (self.zoom_list * 100.0).round() / 100.0,
             "zoom_grid": (self.zoom_grid * 100.0).round() / 100.0,
+            "zoom_editor": (self.zoom_editor * 100.0).round() / 100.0,
             "sort": sort,
             "ascending": self.ascending,
         });
@@ -450,6 +494,16 @@ impl App {
             .send_viewport_cmd(egui::ViewportCommand::Title(format!("{name} — Ferry")));
     }
 
+    fn folder_title(&self) {
+        let name = self
+            .cwd
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "/".into());
+        self.ctx
+            .send_viewport_cmd(egui::ViewportCommand::Title(format!("{name} — Ferry")));
+    }
+
     fn rebuild_view(&mut self) {
         let needle = self.filter.to_lowercase();
         self.view = (0..self.entries.len())
@@ -624,15 +678,256 @@ impl App {
     fn open(&mut self, path: PathBuf) {
         if self.is_folder(&path) {
             self.go(path, None, true);
+        } else if crate::editor::wants(self.thumbs.mime_for(&path)) {
+            self.open_editor(path, false);
         } else {
-            let name = path
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            let mut command = Command::new("xdg-open");
-            command.arg(&path);
-            self.launch(command, name);
+            self.open_external(path);
         }
+    }
+
+    fn open_external(&mut self, path: PathBuf) {
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let mut command = Command::new("xdg-open");
+        command.arg(&path);
+        self.launch(command, name);
+    }
+
+    /// Opens a file in the built-in editor, reading it on a background thread.
+    fn open_editor(&mut self, path: PathBuf, forced: bool) {
+        if self.editor.as_ref().is_some_and(|e| e.dirty()) {
+            return self.error(tr("Save or close the file being edited first"));
+        }
+        self.editor = Some(crate::editor::Editor::loading(path.clone()));
+        let (tx, ctx) = (self.load_tx.clone(), self.ctx.clone());
+        std::thread::spawn(move || {
+            let result = crate::editor::read(&path);
+            let _ = tx.send(Loaded::Text {
+                path,
+                forced,
+                result,
+            });
+            ctx.request_repaint();
+        });
+    }
+
+    fn text_loaded(
+        &mut self,
+        path: PathBuf,
+        forced: bool,
+        result: std::io::Result<(crate::editor::Opened, Option<SystemTime>)>,
+    ) {
+        use crate::editor::Opened;
+        let Some(editor) = self.editor.as_mut().filter(|e| e.path == path && e.loading) else {
+            return;
+        };
+        match result {
+            Ok((Opened::Text(text), mtime)) => {
+                editor.loaded(text, mtime, false);
+                self.focus_editor = true;
+                self.status = None;
+            }
+            Ok((Opened::ReadOnly(text), mtime)) => {
+                editor.loaded(text, mtime, true);
+                self.status = Some((tr("Not UTF-8 text, so it opens read-only"), false));
+            }
+            Ok((opened, _)) => {
+                let message = crate::editor::refusal(&opened).unwrap_or_default();
+                self.editor = None;
+                if forced {
+                    self.error(tr("Can't open this file as text"));
+                } else {
+                    self.status = Some((message, false));
+                    self.open_external(path);
+                }
+                return;
+            }
+            Err(e) => {
+                self.editor = None;
+                return self.error(format!("{}: {e}", path.display()));
+            }
+        }
+        let title = format!(
+            "{} — Ferry",
+            self.editor.as_ref().map(|e| e.name()).unwrap_or_default()
+        );
+        self.ctx
+            .send_viewport_cmd(egui::ViewportCommand::Title(title));
+    }
+
+    fn save_editor(&mut self, force: bool) {
+        let Some(editor) = self
+            .editor
+            .as_mut()
+            .filter(|e| !e.read_only && !e.loading && !e.saving)
+        else {
+            return;
+        };
+        editor.saving = true;
+        let (path, text, opened_at) = (editor.path.clone(), editor.text.clone(), editor.mtime);
+        let (tx, ctx) = (self.load_tx.clone(), self.ctx.clone());
+        std::thread::spawn(move || {
+            let result = crate::editor::save(&path, &text, opened_at, force);
+            let _ = tx.send(Loaded::Saved { path, text, result });
+            ctx.request_repaint();
+        });
+    }
+
+    fn text_saved(
+        &mut self,
+        path: PathBuf,
+        text: String,
+        result: Result<Option<SystemTime>, crate::editor::SaveError>,
+    ) {
+        let Some(editor) = self.editor.as_mut().filter(|e| e.path == path) else {
+            return;
+        };
+        match result {
+            Ok(mtime) => {
+                editor.saved(text, mtime);
+                self.status = Some((tr("Saved %1").replace("%1", &editor.name()), false));
+                match self.after_save.take() {
+                    Some(AfterSave::Close) => self.close_editor(),
+                    Some(AfterSave::Quit) => self.quit(),
+                    None => {}
+                }
+            }
+            Err(crate::editor::SaveError::ChangedOnDisk) => {
+                editor.saving = false;
+                self.dialog = Some(Dialog::ChangedOnDisk);
+            }
+            Err(crate::editor::SaveError::Failed(message)) => {
+                editor.saving = false;
+                self.after_save = None;
+                self.error(message);
+            }
+        }
+    }
+
+    /// Back to the folder; asks first when there are unsaved changes.
+    fn request_close_editor(&mut self) {
+        match &self.editor {
+            Some(e) if e.dirty() => self.dialog = Some(Dialog::Unsaved { quit: false }),
+            Some(_) => self.close_editor(),
+            None => {}
+        }
+    }
+
+    fn close_editor(&mut self) {
+        if let Some(editor) = self.editor.take() {
+            self.folder_title();
+            // Select the file just edited, with its new size and date.
+            self.reload(Some(editor.path));
+        }
+    }
+
+    fn quit(&mut self) {
+        self.allow_close = true;
+        self.ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+    }
+
+    /// The editor in place of the folder: a header with the file's name and actions, and the
+    /// text with line numbers.
+    fn editor_view(&mut self, ui: &mut Ui) {
+        let p = self.p();
+        let z = self.zoom_editor;
+        let Some(editor) = self.editor.as_mut() else {
+            return;
+        };
+        let (dirty, read_only, saving, loading) = (
+            editor.dirty(),
+            editor.read_only,
+            editor.saving,
+            editor.loading,
+        );
+        let path = editor.path.clone();
+        let mut action = None;
+        ui.horizontal(|ui| {
+            if ui
+                .add(egui::Button::new(RichText::new("\u{f053}").size(14.0)).frame(false))
+                .on_hover_text(tr("Back to the folder (Esc)"))
+                .clicked()
+            {
+                action = Some(Action::CloseEditor);
+            }
+            ui.label(RichText::new(editor.name()).size(15.0).color(p.bright));
+            if dirty {
+                ui.label(RichText::new("\u{25cf}").color(p.accent))
+                    .on_hover_text(tr("Unsaved changes"));
+            }
+            if read_only && !loading {
+                ui.label(RichText::new(tr("Read-only")).size(12.0).color(p.yellow));
+            }
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                let fill = if dirty { p.accent } else { p.surface };
+                let save =
+                    egui::Button::new(RichText::new(tr("Save")).color(crate::theme::on(fill)))
+                        .fill(fill);
+                if ui
+                    .add_enabled(dirty && !saving, save)
+                    .on_hover_text("Ctrl+S")
+                    .clicked()
+                {
+                    action = Some(Action::SaveEditor(false));
+                }
+                if saving {
+                    ui.spinner();
+                }
+                if ui.button(tr("Open With Default App")).clicked() {
+                    action = Some(Action::OpenExternal(path.clone()));
+                }
+            });
+        });
+        ui.add_space(4.0);
+        if loading {
+            ui.centered_and_justified(|ui| ui.spinner());
+            self.pending.extend(action);
+            return;
+        }
+        let font = FontId::monospace((14.0 * z).round());
+        let numbers = editor.line_numbers();
+        let focus = std::mem::take(&mut self.focus_editor);
+        egui::Frame::new()
+            .fill(p.sidebar)
+            .corner_radius(CornerRadius::same(self.theme.radius().min(6)))
+            .inner_margin(Margin::symmetric(6, 6))
+            .show(ui, |ui| {
+                ScrollArea::both().auto_shrink(false).show(ui, |ui| {
+                    ui.horizontal_top(|ui| {
+                        ui.label(RichText::new(numbers).font(font.clone()).color(p.dim));
+                        ui.add_space(6.0);
+                        let size = ui.available_size();
+                        let response = if read_only {
+                            // A &str buffer: selectable and copyable, but not editable.
+                            let mut text: &str = &editor.text;
+                            ui.add(
+                                TextEdit::multiline(&mut text)
+                                    .font(font.clone())
+                                    .frame(egui::Frame::NONE)
+                                    .margin(Margin::ZERO)
+                                    .min_size(size),
+                            )
+                        } else {
+                            ui.add(
+                                TextEdit::multiline(&mut editor.text)
+                                    .code_editor()
+                                    .font(font.clone())
+                                    .frame(egui::Frame::NONE)
+                                    .margin(Margin::ZERO)
+                                    .lock_focus(true)
+                                    .desired_width(f32::INFINITY)
+                                    .min_size(size),
+                            )
+                        };
+                        if focus {
+                            response.request_focus();
+                        }
+                    });
+                });
+            });
+        self.pending.extend(action);
     }
 
     fn apply(&mut self, action: Action) {
@@ -794,6 +1089,10 @@ impl App {
                 }
                 self.bookmarks = files::bookmarks(&self.bookmarks_file);
             }
+            Action::EditText(path) => self.open_editor(path, true),
+            Action::OpenExternal(path) => self.open_external(path),
+            Action::CloseEditor => self.request_close_editor(),
+            Action::SaveEditor(force) => self.save_editor(force),
             Action::RemovePlace(path) => {
                 if let Err(e) = files::update_bookmarks(&self.bookmarks_file, &[], Some(&path)) {
                     self.error(format!("{}: {e}", self.bookmarks_file.display()));
@@ -887,6 +1186,21 @@ impl App {
                     modifiers: m,
                     ..
                 } => {
+                    if self.editor.is_some() {
+                        match key {
+                            Key::S if m.command => self.pending.push(Action::SaveEditor(false)),
+                            Key::W if m.command => self.pending.push(Action::CloseEditor),
+                            Key::Escape => self.pending.push(Action::CloseEditor),
+                            Key::Q if m.command => {
+                                ctx.send_viewport_cmd(egui::ViewportCommand::Close)
+                            }
+                            Key::Plus | Key::Equals if m.command => self.zoom_by(1.25),
+                            Key::Minus if m.command => self.zoom_by(0.8),
+                            Key::Num0 if m.command => self.zoom_by(0.0),
+                            _ => {}
+                        }
+                        continue;
+                    }
                     // These work even while a text field has focus.
                     match key {
                         Key::Q if m.command => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
@@ -900,6 +1214,7 @@ impl App {
                         self.key(key, m, now);
                     }
                 }
+                _ if self.editor.is_some() => {}
                 Event::Text(t) if !typing => {
                     let fresh = self.jump.0.is_empty() || now - self.jump.1 > 1.0;
                     match t.as_str() {
@@ -998,7 +1313,9 @@ impl App {
     }
 
     fn zoom(&self) -> f32 {
-        if self.grid {
+        if self.editor.is_some() {
+            self.zoom_editor
+        } else if self.grid {
             self.zoom_grid
         } else {
             self.zoom_list
@@ -1007,13 +1324,14 @@ impl App {
 
     /// Multiplies the current view's zoom, keeping the cursor in sight.
     fn zoom_by(&mut self, factor: f32) {
-        let zoom = if self.grid {
-            &mut self.zoom_grid
+        let (zoom, max) = if self.editor.is_some() {
+            (&mut self.zoom_editor, 3.0)
+        } else if self.grid {
+            // Icons go to 4x, where they read like Dolphin's largest; details rows stop at 2.5x.
+            (&mut self.zoom_grid, 4.0)
         } else {
-            &mut self.zoom_list
+            (&mut self.zoom_list, 2.5)
         };
-        // Details rows stop at 2.5x; icons go to 4x, where they read like Dolphin's largest.
-        let max = if self.grid { 4.0 } else { 2.5 };
         *zoom = if factor == 0.0 {
             1.0
         } else {
@@ -1738,6 +2056,18 @@ impl App {
         let is_dir = single && self.is_folder(&self.targets()[0]);
         for (label, keys, action, enabled) in [
             (tr("Open"), "Enter", Action::Open, true),
+            (
+                tr("Open in Text Editor"),
+                "",
+                Action::EditText(self.targets().first().cloned().unwrap_or_default()),
+                single && !is_dir,
+            ),
+            (
+                tr("Open With Default App"),
+                "",
+                Action::OpenExternal(self.targets().first().cloned().unwrap_or_default()),
+                single && !is_dir,
+            ),
             (tr("Cut"), "Ctrl+X", Action::Cut, true),
             (tr("Copy"), "Ctrl+C", Action::Copy, true),
             (tr("Copy Path"), "Ctrl+Alt+C", Action::CopyPath, true),
@@ -1825,6 +2155,9 @@ impl App {
             ctx.input(|i| (i.key_pressed(Key::Enter), i.key_pressed(Key::Escape)));
         let mut close = escape;
         let mut confirm = false;
+        // Unsaved-changes answer: Some(Some(then)) saves first, Some(None) discards.
+        let mut unsaved: Option<Option<AfterSave>> = None;
+        let mut unsaved_quit = false;
         let frame = egui::Frame::popup(&ctx.global_style())
             .inner_margin(Margin::same(18))
             .fill(p.surface);
@@ -1882,16 +2215,52 @@ impl App {
                         help(ui, &p);
                         close |= enter;
                     }
+                    Dialog::Unsaved { quit } => {
+                        let name = self.editor.as_ref().map(|e| e.name()).unwrap_or_default();
+                        ui.label(
+                            RichText::new(tr("Save changes to %1?").replace("%1", &name))
+                                .size(16.0)
+                                .color(p.bright),
+                        );
+                        ui.add_space(4.0);
+                        ui.label(RichText::new(tr("Your changes will be lost if you don't save them.")).color(p.fg));
+                        ui.add_space(10.0);
+                        let then = if *quit { AfterSave::Quit } else { AfterSave::Close };
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            let save = egui::Button::new(RichText::new(tr("Save")).color(crate::theme::on(p.accent))).fill(p.accent);
+                            if ui.add(save).clicked() || enter {
+                                unsaved = Some(Some(then));
+                            }
+                            if ui.button(tr("Cancel")).clicked() {
+                                close = true;
+                            }
+                            if ui.button(RichText::new(tr("Don't Save")).color(p.red)).clicked() {
+                                unsaved = Some(None);
+                            }
+                        });
+                        unsaved_quit = *quit;
+                    }
+                    Dialog::ChangedOnDisk => {
+                        let name = self.editor.as_ref().map(|e| e.name()).unwrap_or_default();
+                        ui.label(
+                            RichText::new(tr("%1 changed on disk").replace("%1", &name))
+                                .size(16.0)
+                                .color(p.bright),
+                        );
+                        ui.add_space(4.0);
+                        ui.label(RichText::new(tr("Another program saved it after you opened it here. Overwrite its changes with yours?")).color(p.fg));
+                    }
                 }
-                if !matches!(dialog, Dialog::Help) {
+                if !matches!(dialog, Dialog::Help | Dialog::Unsaved { .. }) {
                     ui.add_space(10.0);
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         let label = match dialog {
                             Dialog::Rename { .. } => tr("Rename"),
                             Dialog::NewFolder { .. } => tr("Create"),
+                            Dialog::ChangedOnDisk => tr("Overwrite"),
                             _ => tr("Delete"),
                         };
-                        let fill = if matches!(dialog, Dialog::Delete { .. }) {
+                        let fill = if matches!(dialog, Dialog::Delete { .. } | Dialog::ChangedOnDisk) {
                             p.red
                         } else {
                             p.accent
@@ -1914,7 +2283,26 @@ impl App {
                 }
             });
         if close {
+            if matches!(self.dialog, Some(Dialog::ChangedOnDisk)) {
+                self.after_save = None;
+            }
             self.dialog = None;
+        } else if let Some(answer) = unsaved {
+            self.dialog = None;
+            match answer {
+                Some(then) => {
+                    self.after_save = Some(then);
+                    self.save_editor(false);
+                }
+                None if unsaved_quit => self.quit(),
+                None => {
+                    // Discard: forget the edits, then leave.
+                    if let Some(editor) = &mut self.editor {
+                        editor.read_only = true;
+                    }
+                    self.close_editor();
+                }
+            }
         } else if confirm {
             self.confirm();
         }
@@ -1966,7 +2354,8 @@ impl App {
                     files::delete(&paths).map(|_| trn("Deleted %n items", n))
                 });
             }
-            Some(Dialog::Help) | None => {}
+            Some(Dialog::ChangedOnDisk) => self.save_editor(true),
+            Some(Dialog::Help) | Some(Dialog::Unsaved { .. }) | None => {}
         }
     }
 
@@ -1985,6 +2374,12 @@ impl App {
         while let Ok(loaded) = self.load_rx.try_recv() {
             match loaded {
                 Loaded::Dir(load) => self.loaded(load),
+                Loaded::Text {
+                    path,
+                    forced,
+                    result,
+                } => self.text_loaded(path, forced, result),
+                Loaded::Saved { path, text, result } => self.text_saved(path, text, result),
                 Loaded::Check { path, mtime, free } => {
                     self.checking = false;
                     if path == self.cwd && self.loading.is_none() {
@@ -2061,6 +2456,13 @@ impl App {
     fn draw(&mut self, ui: &mut Ui) {
         let p = self.p();
         let ctx = ui.ctx().clone();
+        if ctx.input(|i| i.viewport().close_requested())
+            && !self.allow_close
+            && self.editor.as_ref().is_some_and(|e| e.dirty())
+        {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.dialog = Some(Dialog::Unsaved { quit: true });
+        }
         if self.dialog.is_none() {
             self.keys(ui);
         }
@@ -2099,7 +2501,13 @@ impl App {
                 top: 2,
                 bottom: 0,
             }))
-            .show(ui, |ui| self.folder(ui));
+            .show(ui, |ui| {
+                if self.editor.is_some() {
+                    self.editor_view(ui);
+                } else {
+                    self.folder(ui);
+                }
+            });
 
         self.drag_out(&ctx);
         self.drag_preview(&ctx, &p);
@@ -2266,6 +2674,8 @@ fn help(ui: &mut Ui, p: &Palette) {
                 ("Ctrl+Wheel / Ctrl+± / Ctrl+0", "Zoom"),
                 ("F4", "Open Terminal Here"),
                 ("F5", "Refresh"),
+                ("Ctrl+S", "Save (in the text editor)"),
+                ("Esc / Ctrl+W", "Close the text editor"),
                 ("?", "Keyboard shortcuts"),
                 ("Ctrl+Q", "Quit"),
             ] {
@@ -2435,5 +2845,52 @@ mod settings_tests {
         std::fs::write(&file, "{\"zoom_grid\": 99, \"sort\": \"bogus\"").unwrap();
         let broken = App::new(&ctx, std::env::temp_dir(), None).with_settings(file);
         assert_eq!((broken.zoom_grid, broken.sort), (1.0, SortKey::Name));
+    }
+}
+
+#[cfg(test)]
+mod editor_tests {
+    use super::*;
+
+    fn settle(ctx: &egui::Context, app: &mut App) {
+        for _ in 0..30 {
+            std::thread::sleep(Duration::from_millis(10));
+            let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
+                app.poll(ui.ctx());
+                app.draw(ui);
+            });
+            out.textures_delta.clear();
+        }
+    }
+
+    #[test]
+    fn text_files_open_edit_and_save_in_ferry() {
+        let dir = std::env::temp_dir().join(format!("ferry-edit-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("notes.md"), "# Notes\n").unwrap();
+        let ctx = egui::Context::default();
+        let mut app = App::new(&ctx, dir.clone(), None);
+        settle(&ctx, &mut app);
+
+        app.open(dir.join("notes.md"));
+        settle(&ctx, &mut app);
+        let editor = app.editor.as_mut().expect("opened in the editor");
+        assert_eq!(editor.text, "# Notes\n");
+        editor.text.push_str("- milk\n");
+
+        // Leaving with unsaved changes asks instead of closing.
+        app.request_close_editor();
+        assert!(matches!(app.dialog, Some(Dialog::Unsaved { quit: false })));
+        app.dialog = None;
+
+        app.after_save = Some(AfterSave::Close);
+        app.save_editor(false);
+        settle(&ctx, &mut app);
+        assert_eq!(
+            std::fs::read_to_string(dir.join("notes.md")).unwrap(),
+            "# Notes\n- milk\n"
+        );
+        assert!(app.editor.is_none(), "closed after saving");
     }
 }

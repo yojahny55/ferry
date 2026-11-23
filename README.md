@@ -36,6 +36,10 @@ background so a sleeping NAS never freezes the window, and the app starts instan
   freedesktop thumbnail cache, so previews other apps already made appear instantly.
 - **Bookmarks** you can drag folders onto or add with **+**, shared with GTK's bookmarks, so
   they also show up in the desktop's file pickers.
+- **A built-in text editor** for notes, Markdown, code and config files: Enter opens them in
+  Ferry with line numbers and undo, Ctrl+S saves, Esc goes back. Saving is atomic, keeps file
+  permissions, and won't overwrite changes another program made in the meantime. Images,
+  videos and documents still open in your default apps.
 - **Drag files out** into other apps (a browser, a chat, another file manager) through native Wayland drag-and-drop.
 - **Safe file operations**: paste never overwrites (`name (1).ext`), Delete moves to the trash,
   and only Shift+Delete deletes, after asking.
@@ -127,7 +131,9 @@ Press `?` in the app for this list.
 | F4 | Open a terminal here |
 | F5 | Refresh |
 | ? | Keyboard shortcuts |
-| Ctrl+Q | Quit |
+| Ctrl+S | Save (text editor) |
+| Esc / Ctrl+W | Close the text editor |
+| Ctrl+Q | Quit (asks first if there are unsaved changes) |
 
 ## Files Ferry reads and writes
 
@@ -151,7 +157,8 @@ single JSON file; see [CONTRIBUTING.md](CONTRIBUTING.md#translations).
 - Dropping files *into* Ferry from other apps isn't supported yet.
 - No tabs, split view, or undo yet.
 - Right-to-left languages aren't laid out right to left yet.
-- *Open with…* and file properties aren't there yet.
+- *Open with…* (choosing among apps) and file properties aren't there yet.
+- The text editor has no search, syntax highlighting or Markdown preview yet, and edits files up to 5 MiB.
 
 See the [issues](https://github.com/yojahny55/ferry/issues) for what's planned, and feel free to
 open one for what you'd like.

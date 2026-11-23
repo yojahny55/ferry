@@ -97,12 +97,16 @@ impl Registry {
 
     /// The thumbnailer command for a file, if anything can preview it.
     pub fn exec_for(&self, path: &Path) -> Option<&str> {
+        self.by_mime.get(self.mime_for(path)?).map(String::as_str)
+    }
+
+    /// The MIME type for a file name, from the shared MIME database's extension globs.
+    pub fn mime_for(&self, path: &Path) -> Option<&str> {
         let name = path.file_name()?.to_string_lossy().to_lowercase();
         // Longest extension first, so "x.tar.gz" finds "tar.gz" before "gz".
-        let mime = name
-            .match_indices('.')
-            .find_map(|(i, _)| self.by_ext.get(&name[i + 1..]))?;
-        self.by_mime.get(mime).map(String::as_str)
+        name.match_indices('.')
+            .find_map(|(i, _)| self.by_ext.get(&name[i + 1..]))
+            .map(String::as_str)
     }
 }
 
@@ -350,6 +354,10 @@ impl Thumbs {
             results,
             slots: HashMap::new(),
         }
+    }
+
+    pub fn mime_for(&self, path: &Path) -> Option<&str> {
+        self.registry.mime_for(path)
     }
 
     /// Drops every preview and pending request, as when another folder opens.
