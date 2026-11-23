@@ -1,0 +1,50 @@
+#!/bin/bash
+# Publishes aur/PKGBUILD to the AUR as ferry-fm, for the version given (default: Cargo.toml's).
+#   bin/aur-publish            # the current version, after its GitHub release exists
+#   bin/aur-publish 0.3.0      # a newer tag
+# Points the PKGBUILD at the tag's source tarball, checks it builds and passes its tests, then
+# pushes PKGBUILD and .SRCINFO to ssh://aur@aur.archlinux.org/ferry-fm.git. Needs an AUR
+# account with your SSH key added (https://aur.archlinux.org/account).
+set -euo pipefail
+
+root="$(cd "$(dirname "$0")/.." && pwd)"
+version="${1:-$(sed -n 's/^version = "\(.*\)"/\1/p' "$root/Cargo.toml" | head -1)}"
+url="https://github.com/yojahny55/ferry/archive/refs/tags/v$version.tar.gz"
+
+echo "==> ferry-fm $version"
+sum="$(curl -fsSL "$url" | sha256sum | cut -d' ' -f1)" || {
+  echo "No source tarball for v$version: tag and release it on GitHub first." >&2
+  exit 1
+}
+
+cd "$root/aur"
+current="$(sed -n 's/^pkgver=//p' PKGBUILD)"
+sed -i "s/^pkgver=.*/pkgver=$version/; s/^sha256sums=.*/sha256sums=('$sum')/" PKGBUILD
+# A new version starts at release 1; the same version again means the packaging changed.
+if [[ $current != "$version" ]]; then
+  sed -i "s/^pkgrel=.*/pkgrel=1/" PKGBUILD
+fi
+makepkg --printsrcinfo >.SRCINFO
+
+work="$(mktemp -d)"
+trap 'rm -rf "$work"' EXIT
+echo "==> Building in $work"
+cp PKGBUILD "$work/"
+(cd "$work" && makepkg -f --noconfirm >build.log 2>&1) || {
+  tail -30 "$work/build.log" >&2
+  echo "The package didn't build; nothing was pushed." >&2
+  exit 1
+}
+
+echo "==> Pushing to the AUR"
+git clone -q ssh://aur@aur.archlinux.org/ferry-fm.git "$work/aur"
+cp PKGBUILD .SRCINFO "$work/aur/"
+cd "$work/aur"
+git add PKGBUILD .SRCINFO
+if git diff --cached --quiet; then
+  echo "The AUR already has this."
+  exit 0
+fi
+git commit -q -m "Update to $version-$(sed -n 's/^pkgrel=//p' PKGBUILD)"
+git push -q origin HEAD:master
+echo "==> https://aur.archlinux.org/packages/ferry-fm"

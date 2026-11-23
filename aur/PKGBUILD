@@ -1,0 +1,63 @@
+# Maintainer: Yojahny Chavez <contact at yojahny dot dev>
+
+pkgname=ferry-fm
+_name=ferry
+pkgver=0.2.0
+pkgrel=1
+pkgdesc='Keyboard-first file manager for Omarchy and Hyprland that follows your theme live'
+arch=('x86_64' 'aarch64')
+url='https://github.com/yojahny55/ferry'
+license=('MIT')
+# The binary links only glibc and libgcc; winit loads Wayland, xkbcommon and EGL at runtime,
+# and Ferry runs the rest as programs (thumbnails, trash, drives, desktop settings).
+depends=(
+  'libgcc' 'glibc'
+  'wayland' 'libxkbcommon' 'libglvnd'
+  'fontconfig'   # fc-match: the desktop's font
+  'glib2'        # gio (trash), gdbus (formatting), gsettings (text size)
+  'util-linux'   # lsblk: drives
+  'xdg-utils'    # xdg-open: files Ferry doesn't open itself
+  'coreutils'    # cp, mv
+  'hicolor-icon-theme'
+)
+makedepends=('cargo')
+optdepends=(
+  'udisks2: mount, eject and format drives'
+  'xdg-terminal-exec: Open Terminal Here'
+  'hyprland: window rounding follows Hyprland'
+  'exfatprogs: format drives as exFAT'
+  'dosfstools: format drives as FAT32'
+  'ntfs-3g: format drives as NTFS'
+  'ffmpegthumbnailer: video previews'
+)
+source=("$_name-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('382ed1ddffea259417d9f8f79962cc9df74381ec6f18bce090d393cdbf7db42f')
+
+prepare() {
+  cd "$_name-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  cargo fetch --locked --target "$(rustc --print host-tuple)"
+}
+
+build() {
+  cd "$_name-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+  cargo build --frozen --release
+}
+
+check() {
+  cd "$_name-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+  cargo test --frozen --release
+}
+
+package() {
+  cd "$_name-$pkgver"
+  install -Dm755 target/release/ferry "$pkgdir/usr/bin/ferry"
+  install -Dm644 pkgbuild/ferry.desktop "$pkgdir/usr/share/applications/ferry.desktop"
+  install -Dm644 pkgbuild/ferry.svg "$pkgdir/usr/share/icons/hicolor/scalable/apps/ferry.svg"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  install -Dm644 README.md CHANGELOG.md -t "$pkgdir/usr/share/doc/$pkgname"
+}

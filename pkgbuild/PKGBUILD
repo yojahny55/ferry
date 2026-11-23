@@ -1,4 +1,4 @@
-pkgname=ferry
+pkgname=ferry-fm
 pkgver=0.2.0
 pkgrel=1
 pkgdesc='A keyboard-first file manager that follows the Omarchy theme'

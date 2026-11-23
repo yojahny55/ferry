@@ -21,6 +21,7 @@ cd ferry
 cargo run -- ~/Pictures      # run against a folder
 bin/test                     # unit tests
 bin/install                  # build a pacman package and install it (Arch/Omarchy)
+bin/aur-publish              # maintainers: publish the released version to the AUR (ferry-fm)
 ```
 
 Before sending a pull request, make sure these pass, as CI runs them:

@@ -87,6 +87,15 @@ background, blurred by Hyprland. The Appearance menu sets the opacity by hand to
 Ferry targets Omarchy and other Arch-based Hyprland desktops. It needs a Wayland session for
 dragging files out; the rest also builds for X11, but that path is untested.
 
+### From the AUR (Arch / Omarchy)
+
+```sh
+yay -S ferry-fm    # or: paru -S ferry-fm
+```
+
+The package is [ferry-fm](https://aur.archlinux.org/packages/ferry-fm); the command it installs
+is `ferry`. It builds from the release's source and runs the tests while it builds.
+
 ### From a release
 
 Download the latest `ferry-*-x86_64-linux.tar.gz` from
