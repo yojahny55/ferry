@@ -1,6 +1,6 @@
 [package]
 name = "ferry"
-version = "0.2.0"
+version = "0.2.1"
 description = "A keyboard-first file manager that follows the Omarchy theme"
 license = "MIT"
 authors = ["Yojahny Chavez"]

@@ -6,6 +6,16 @@ All notable changes to Ferry are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-11-23
+
+### Added
+
+- Each release carries a pacman package, `ferry-fm-<version>-1-x86_64.pkg.tar.zst`, built on
+  a clean Arch machine: install it with `sudo pacman -U`. The package is named `ferry-fm`
+  (the command is still `ferry`), since another app already claims the name `ferry`.
+- An AUR PKGBUILD for `ferry-fm` in `aur/`, published as soon as AUR registration reopens.
+  Until then, `makepkg -si` with it builds and installs Ferry from source.
+
 ## [0.2.0] - 2026-11-23
 
 ### Added
@@ -77,7 +87,8 @@ The first release.
 - Background folder loading, so slow or unreachable network mounts never freeze the window.
 - `FERRY_DEBUG=1` logging for drags, thumbnails and settings.
 
-[Unreleased]: https://github.com/yojahny55/ferry/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/yojahny55/ferry/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/yojahny55/ferry/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/yojahny55/ferry/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/yojahny55/ferry/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/yojahny55/ferry/releases/tag/v0.1.0
