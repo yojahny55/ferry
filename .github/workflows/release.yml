@@ -1,0 +1,40 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build and publish
+    runs-on: ubuntu-latest
+    container: archlinux:latest
+    steps:
+      - name: Install toolchain and libraries
+        run: pacman -Syu --noconfirm --needed rust base-devel git wayland libxkbcommon libglvnd fontconfig github-cli
+      - uses: actions/checkout@v4
+      - run: cargo test --locked
+      - run: cargo build --release --locked
+      - name: Package
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          test "$version" = "$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)" \
+            || { echo "Tag $GITHUB_REF_NAME doesn't match Cargo.toml's version"; exit 1; }
+          name="ferry-${version}-x86_64-linux"
+          mkdir "$name"
+          cp target/release/ferry pkgbuild/ferry.desktop pkgbuild/ferry.svg LICENSE README.md CHANGELOG.md "$name/"
+          tar czf "$name.tar.gz" "$name"
+          sha256sum "$name.tar.gz" > "$name.tar.gz.sha256"
+          # Release notes are this version's section of the changelog.
+          awk -v v="$version" '$0 ~ "^## \\[" v "\\]" {on=1; next} /^## \[/ {on=0} /^\[.*\]: / {on=0} on' CHANGELOG.md > notes.md
+          echo "ASSET=$name" >> "$GITHUB_ENV"
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          gh release create "$GITHUB_REF_NAME" "$ASSET.tar.gz" "$ASSET.tar.gz.sha256" \
+            --title "Ferry ${GITHUB_REF_NAME}" --notes-file notes.md --verify-tag

@@ -1,0 +1,125 @@
+{
+  "Moved %n items to the trash": {
+    "one": "%n elemento movido a la papelera",
+    "other": "%n elementos movidos a la papelera"
+  },
+  "Cut %n items": {
+    "one": "%n elemento cortado",
+    "other": "%n elementos cortados"
+  },
+  "Copied %n items": {
+    "one": "%n elemento copiado",
+    "other": "%n elementos copiados"
+  },
+  "Pasted %n items": {
+    "one": "%n elemento pegado",
+    "other": "%n elementos pegados"
+  },
+  "Deleted %n items": {
+    "one": "%n elemento eliminado",
+    "other": "%n elementos eliminados"
+  },
+  "Permanently delete %n items?": {
+    "one": "¿Eliminar %n elemento para siempre?",
+    "other": "¿Eliminar %n elementos para siempre?"
+  },
+  "%n folders": {
+    "one": "%n carpeta",
+    "other": "%n carpetas"
+  },
+  "%n files": {
+    "one": "%n archivo",
+    "other": "%n archivos"
+  },
+  "%n selected": {
+    "one": "%n seleccionado",
+    "other": "%n seleccionados"
+  },
+  "Can't put %1 inside itself": "No se puede poner %1 dentro de sí mismo",
+  "That name can't be used": "Ese nombre no se puede usar",
+  "%1 already exists": "%1 ya existe",
+  "Home": "Inicio",
+  "Desktop": "Escritorio",
+  "Documents": "Documentos",
+  "Downloads": "Descargas",
+  "Music": "Música",
+  "Pictures": "Imágenes",
+  "Videos": "Vídeos",
+  "Trash": "Papelera",
+  "Root": "Raíz",
+  "Couldn't open %1": "No se pudo abrir %1",
+  "Moving to the trash…": "Moviendo a la papelera…",
+  "New Folder": "Nueva carpeta",
+  "The clipboard holds no files": "El portapapeles no contiene archivos",
+  "Terminal": "Terminal",
+  "Moving…": "Moviendo…",
+  "Copying…": "Copiando…",
+  "Deleting…": "Eliminando…",
+  "Back (Alt+Left)": "Atrás (Alt+Izquierda)",
+  "Forward (Alt+Right)": "Adelante (Alt+Derecha)",
+  "Up (Alt+Up)": "Subir (Alt+Arriba)",
+  "Icons (Ctrl+2)": "Iconos (Ctrl+2)",
+  "Details (Ctrl+1)": "Detalles (Ctrl+1)",
+  "Hidden files (Ctrl+H)": "Archivos ocultos (Ctrl+H)",
+  "Filter": "Filtrar",
+  "No folder at %1": "No hay ninguna carpeta en %1",
+  "Places": "Lugares",
+  "Devices": "Dispositivos",
+  "Keyboard shortcuts": "Atajos de teclado",
+  "%1 free": "%1 libres",
+  "Nothing matches the filter": "Nada coincide con el filtro",
+  "This folder is empty": "Esta carpeta está vacía",
+  "Name": "Nombre",
+  "Size": "Tamaño",
+  "Modified": "Modificado",
+  "Open": "Abrir",
+  "Cut": "Cortar",
+  "Copy": "Copiar",
+  "Copy Path": "Copiar ruta",
+  "Rename…": "Renombrar…",
+  "Move to Trash": "Mover a la papelera",
+  "Delete…": "Eliminar…",
+  "Open Terminal Here": "Abrir terminal aquí",
+  "New Folder…": "Nueva carpeta…",
+  "Paste": "Pegar",
+  "Select All": "Seleccionar todo",
+  "Hide Hidden Files": "Ocultar archivos ocultos",
+  "Show Hidden Files": "Mostrar archivos ocultos",
+  "Refresh": "Actualizar",
+  "This can't be undone.": "Esto no se puede deshacer.",
+  "Rename": "Renombrar",
+  "Create": "Crear",
+  "Delete": "Eliminar",
+  "Cancel": "Cancelar",
+  "Back": "Atrás",
+  "Forward": "Adelante",
+  "Parent folder": "Carpeta superior",
+  "Home folder": "Carpeta personal",
+  "Edit the path": "Editar la ruta",
+  "Jump to a name": "Saltar a un nombre",
+  "Copy, cut, paste": "Copiar, cortar, pegar",
+  "Delete permanently": "Eliminar para siempre",
+  "Hidden files": "Archivos ocultos",
+  "Details or icons": "Detalles o iconos",
+  "Quit": "Salir",
+  "%n items": {
+    "one": "%n elemento",
+    "other": "%n elementos"
+  },
+  "Only new folders can be added": "Solo se pueden añadir carpetas nuevas",
+  "Loading…": "Cargando…",
+  "Loading %1…": "Cargando %1…",
+  "Bookmarks": "Marcadores",
+  "Add to Bookmarks": "Añadir a marcadores",
+  "Remove from Bookmarks": "Quitar de marcadores",
+  "Already in Bookmarks": "Ya está en marcadores",
+  "Drop to bookmark": "Suelta para añadir a marcadores",
+  "Drag folders here, or press +": "Arrastra carpetas aquí o pulsa +",
+  "Bookmark the selected folders, or this one (Ctrl+D)": "Añadir a marcadores las carpetas seleccionadas, o esta (Ctrl+D)",
+  "Added %n folders to Bookmarks": {
+    "one": "%n carpeta añadida a marcadores",
+    "other": "%n carpetas añadidas a marcadores"
+  },
+  "Zoom": "Zoom",
+  "Reset zoom (Ctrl+0)": "Restablecer zoom (Ctrl+0)"
+}

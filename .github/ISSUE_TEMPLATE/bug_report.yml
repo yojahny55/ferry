@@ -1,0 +1,44 @@
+name: Bug report
+description: Something in Ferry doesn't work as it should.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: Thanks for reporting! Security problems go through SECURITY.md instead, please.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open a folder with …
+        2. Press …
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: Debug output
+      description: Run `FERRY_DEBUG=1 ferry` in a terminal, reproduce the problem, and paste what it prints.
+      render: text
+  - type: input
+    id: version
+    attributes:
+      label: Ferry version
+      placeholder: "0.1.0 (from the release name, or `git describe` for a source build)"
+    validations:
+      required: true
+  - type: input
+    id: system
+    attributes:
+      label: System
+      description: Omarchy version (`omarchy version`), or distro and compositor.
+      placeholder: Omarchy 4.x on Hyprland
+    validations:
+      required: true

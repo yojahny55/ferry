@@ -1,0 +1,16 @@
+[Desktop Entry]
+Type=Application
+Name=Ferry
+Name[es]=Ferry
+GenericName=File Manager
+GenericName[es]=Gestor de archivos
+Comment=Browse and manage your files
+Comment[es]=Explora y gestiona tus archivos
+Keywords=files;folders;explorer;file manager;
+Keywords[es]=archivos;carpetas;explorador;gestor de archivos;
+Exec=ferry %f
+Icon=ferry
+Terminal=false
+Categories=System;FileTools;FileManager;
+MimeType=inode/directory;
+StartupWMClass=ferry

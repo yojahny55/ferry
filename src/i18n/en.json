@@ -1,0 +1,46 @@
+{
+  "Moved %n items to the trash": {
+    "one": "Moved %n item to the trash",
+    "other": "Moved %n items to the trash"
+  },
+  "Cut %n items": {
+    "one": "Cut %n item",
+    "other": "Cut %n items"
+  },
+  "Copied %n items": {
+    "one": "Copied %n item",
+    "other": "Copied %n items"
+  },
+  "Pasted %n items": {
+    "one": "Pasted %n item",
+    "other": "Pasted %n items"
+  },
+  "Deleted %n items": {
+    "one": "Deleted %n item",
+    "other": "Deleted %n items"
+  },
+  "Permanently delete %n items?": {
+    "one": "Permanently delete %n item?",
+    "other": "Permanently delete %n items?"
+  },
+  "%n folders": {
+    "one": "%n folder",
+    "other": "%n folders"
+  },
+  "%n files": {
+    "one": "%n file",
+    "other": "%n files"
+  },
+  "%n selected": {
+    "one": "%n selected",
+    "other": "%n selected"
+  },
+  "%n items": {
+    "one": "%n item",
+    "other": "%n items"
+  },
+  "Added %n folders to Bookmarks": {
+    "one": "Added %n folder to Bookmarks",
+    "other": "Added %n folders to Bookmarks"
+  }
+}
