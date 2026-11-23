@@ -7,7 +7,8 @@ Security fixes go into the latest release.
 ## Reporting a vulnerability
 
 Please **don't** open a public issue. Report it privately through GitHub:
-[Report a vulnerability](https://github.com/yojahny55/ferry/security/advisories/new).
+[Report a vulnerability](https://github.com/yojahny55/ferry/security/advisories/new), or by
+email to [contact@yojahny.dev](mailto:contact@yojahny.dev).
 
 Include what you found, how to reproduce it, and what an attacker could do with it. You'll get
 an acknowledgment within a week, and a fix or a plan as soon as the problem is understood.
