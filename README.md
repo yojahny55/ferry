@@ -87,14 +87,23 @@ background, blurred by Hyprland. The Appearance menu sets the opacity by hand to
 Ferry targets Omarchy and other Arch-based Hyprland desktops. It needs a Wayland session for
 dragging files out; the rest also builds for X11, but that path is untested.
 
-### From the AUR (Arch / Omarchy)
+### Arch / Omarchy
+
+Each [release](https://github.com/yojahny55/ferry/releases/latest) carries a pacman package,
+`ferry-fm-<version>-1-x86_64.pkg.tar.zst`, built on a clean Arch machine. Install it with:
 
 ```sh
-yay -S ferry-fm    # or: paru -S ferry-fm
+sudo pacman -U ferry-fm-*-x86_64.pkg.tar.zst
 ```
 
-The package is [ferry-fm](https://aur.archlinux.org/packages/ferry-fm); the command it installs
-is `ferry`. It builds from the release's source and runs the tests while it builds.
+The package is named `ferry-fm`; the command it installs is `ferry`. An AUR package of the
+same name is ready (its PKGBUILD is in [`aur/`](aur/PKGBUILD)) and goes up as soon as AUR
+registration reopens. Until then you can also build it yourself:
+
+```sh
+curl -LO https://raw.githubusercontent.com/yojahny55/ferry/main/aur/PKGBUILD
+makepkg -si
+```
 
 ### From a release
 

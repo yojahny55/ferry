@@ -14,7 +14,7 @@ jobs:
     container: archlinux:latest
     steps:
       - name: Install toolchain and libraries
-        run: pacman -Syu --noconfirm --needed rust base-devel git wayland libxkbcommon libglvnd fontconfig github-cli
+        run: pacman -Syu --noconfirm --needed rust base-devel git wayland libxkbcommon libglvnd fontconfig github-cli xdg-utils hicolor-icon-theme
       - uses: actions/checkout@v7
       - run: cargo test --locked
       - run: cargo build --release --locked
@@ -31,10 +31,29 @@ jobs:
           # Release notes are this version's section of the changelog.
           awk -v v="$version" '$0 ~ "^## \\[" v "\\]" {on=1; next} /^## \[/ {on=0} /^\[.*\]: / {on=0} on' CHANGELOG.md > notes.md
           echo "ASSET=$name" >> "$GITHUB_ENV"
+      # The same package the AUR builds (aur/PKGBUILD), for `pacman -U` straight from the
+      # release. It builds from this commit's source; makepkg refuses to run as root.
+      - name: Pacman package
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          useradd -m builder
+          mkdir /tmp/pkg
+          cp aur/PKGBUILD /tmp/pkg/
+          git archive --prefix="ferry-$version/" -o "/tmp/pkg/ferry-$version.tar.gz" HEAD
+          sum="$(sha256sum "/tmp/pkg/ferry-$version.tar.gz" | cut -d' ' -f1)"
+          sed -i "s/^pkgver=.*/pkgver=$version/; s/^pkgrel=.*/pkgrel=1/; s/^sha256sums=.*/sha256sums=('$sum')/" /tmp/pkg/PKGBUILD
+          chown -R builder /tmp/pkg
+          # The tests already ran above.
+          su builder -c "cd /tmp/pkg && makepkg --noconfirm --nocheck"
+          pkg="ferry-fm-$version-1-x86_64.pkg.tar.zst"
+          cp "/tmp/pkg/$pkg" .
+          sha256sum "$pkg" > "$pkg.sha256"
+          echo "PKG=$pkg" >> "$GITHUB_ENV"
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          git config --global --add safe.directory "$GITHUB_WORKSPACE"
           gh release create "$GITHUB_REF_NAME" "$ASSET.tar.gz" "$ASSET.tar.gz.sha256" \
+            "$PKG" "$PKG.sha256" \
             --title "Ferry ${GITHUB_REF_NAME}" --notes-file notes.md --verify-tag
