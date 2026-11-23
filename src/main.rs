@@ -10,6 +10,7 @@ mod highlight;
 mod i18n;
 mod markdown;
 mod portal;
+mod props;
 mod search;
 mod theme;
 mod thumbs;

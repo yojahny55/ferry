@@ -20,6 +20,8 @@ pub struct Entry {
     pub is_link: bool,
     pub size: u64,
     pub modified: Option<SystemTime>,
+    /// Permission bits (st_mode & 0o7777), from the same look at the disk as the rest.
+    pub mode: u32,
 }
 
 impl Entry {
@@ -37,9 +39,14 @@ pub fn list(dir: &Path) -> io::Result<Vec<Entry>> {
         let is_link = item.file_type().is_ok_and(|t| t.is_symlink());
         // Links are followed so a link to a folder opens like one; a dangling link shows as itself.
         let meta = fs::metadata(&path).or_else(|_| fs::symlink_metadata(&path));
-        let (is_dir, size, modified) = match meta {
-            Ok(m) => (m.is_dir(), m.len(), m.modified().ok()),
-            Err(_) => (false, 0, None),
+        let (is_dir, size, modified, mode) = match meta {
+            Ok(m) => (
+                m.is_dir(),
+                m.len(),
+                m.modified().ok(),
+                std::os::unix::fs::PermissionsExt::mode(&m.permissions()) & 0o7777,
+            ),
+            Err(_) => (false, 0, None, 0),
         };
         out.push(Entry {
             name: item.file_name().to_string_lossy().into_owned(),
@@ -48,6 +55,7 @@ pub fn list(dir: &Path) -> io::Result<Vec<Entry>> {
             is_link,
             size,
             modified,
+            mode,
         });
     }
     Ok(out)

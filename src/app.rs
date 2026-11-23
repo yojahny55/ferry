@@ -54,6 +54,8 @@ enum Dialog {
         path: PathBuf,
         listing: Option<Result<Vec<String>, String>>,
     },
+    /// Properties of one or more files: facts, permissions and checksums.
+    Properties(Box<Props>),
     /// Compressing: the archive's name and format (an index into `archive::formats()`).
     Compress {
         paths: Vec<PathBuf>,
@@ -111,6 +113,10 @@ enum Action {
     /// Ask the desktop's folder picker where to extract archives.
     ExtractTo(Vec<PathBuf>),
     AskCompress,
+    /// Show Properties for these paths.
+    Properties(Vec<PathBuf>),
+    /// Allow or stop running a file as a program.
+    SetExecutable(PathBuf, u32, bool),
     Copy,
     Cut,
     Paste,
@@ -165,6 +171,22 @@ enum Loaded {
     },
     /// A fresh look at the drives and shares.
     Devices(Vec<Device>),
+    /// A file's facts, for Properties.
+    Info {
+        path: PathBuf,
+        result: Result<crate::props::Info, String>,
+    },
+    /// What's inside the paths Properties shows.
+    Usage {
+        paths: Vec<PathBuf>,
+        counts: (u64, u64, u64),
+    },
+    /// A checksum Properties asked for; `which` indexes SUMS.
+    Sum {
+        path: PathBuf,
+        which: usize,
+        result: Result<String, String>,
+    },
     /// The folder picker's answer for Extract To.
     Picked {
         paths: Vec<PathBuf>,
@@ -186,6 +208,32 @@ enum Loaded {
         result: Result<Option<SystemTime>, crate::editor::SaveError>,
     },
 }
+
+/// The Properties dialog's state. Its background work stops when it closes (see `Stop`).
+struct Props {
+    paths: Vec<PathBuf>,
+    /// 0 General, 1 Permissions, 2 Checksums.
+    tab: u8,
+    info: Option<Result<crate::props::Info, String>>,
+    /// (files, folders, bytes) inside, counted in the background.
+    usage: Option<(u64, u64, u64)>,
+    /// SHA-256 and MD5: None until asked for, then Some(None) while computing.
+    sums: [Option<Option<Result<String, String>>>; 2],
+    verify: String,
+    error: Option<String>,
+    _stop: Stop,
+}
+
+/// Sets a flag when dropped, so a closed dialog's background count stops.
+struct Stop(Arc<std::sync::atomic::AtomicBool>);
+
+impl Drop for Stop {
+    fn drop(&mut self) {
+        self.0.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+const SUMS: [(&str, &str); 2] = [("SHA-256", "sha256sum"), ("MD5", "md5sum")];
 
 /// A search below a folder, shown in place of the folder.
 struct SearchView {
@@ -921,6 +969,337 @@ impl App {
         }
     }
 
+    /// Opens Properties, reading facts and counting contents in the background.
+    fn open_properties(&mut self, paths: Vec<PathBuf>) {
+        if paths.is_empty() {
+            return;
+        }
+        let stop = crate::props::stop_flag();
+        if let [path] = &paths[..] {
+            let (tx, ctx, path) = (self.load_tx.clone(), self.ctx.clone(), path.clone());
+            std::thread::spawn(move || {
+                let result = crate::props::info(&path);
+                let _ = tx.send(Loaded::Info { path, result });
+                ctx.request_repaint();
+            });
+        }
+        let (tx, ctx, list, flag) = (
+            self.load_tx.clone(),
+            self.ctx.clone(),
+            paths.clone(),
+            stop.clone(),
+        );
+        std::thread::spawn(move || {
+            let counts = crate::props::usage(&list, &flag);
+            if !flag.load(std::sync::atomic::Ordering::Relaxed) {
+                let _ = tx.send(Loaded::Usage {
+                    paths: list,
+                    counts,
+                });
+                ctx.request_repaint();
+            }
+        });
+        self.dialog = Some(Dialog::Properties(Box::new(Props {
+            paths,
+            tab: 0,
+            info: None,
+            usage: None,
+            sums: [None, None],
+            verify: String::new(),
+            error: None,
+            _stop: Stop(stop),
+        })));
+    }
+
+    /// The Properties dialog's body; returns a permission change to apply, if one was made.
+    fn properties_ui(
+        ui: &mut Ui,
+        props: &mut Props,
+        p: &Palette,
+        tx: &Sender<Loaded>,
+        ctx: &egui::Context,
+        mime: Option<String>,
+    ) -> Option<u32> {
+        let mut new_mode = None;
+        let single = props.paths.len() == 1;
+        let first = &props.paths[0];
+        let name = first
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "/".into());
+        let is_dir = props
+            .info
+            .as_ref()
+            .and_then(|i| i.as_ref().ok())
+            .is_some_and(|i| i.is_dir);
+        ui.label(
+            RichText::new(if single {
+                name.clone()
+            } else {
+                trn("%n items", props.paths.len())
+            })
+            .size(16.0)
+            .color(p.bright),
+        );
+        ui.add_space(6.0);
+        if single {
+            ui.horizontal(|ui| {
+                let tabs = if is_dir {
+                    vec![tr("General"), tr("Permissions")]
+                } else {
+                    vec![tr("General"), tr("Permissions"), tr("Checksums")]
+                };
+                for (i, t) in tabs.into_iter().enumerate() {
+                    if ui.selectable_label(props.tab == i as u8, t).clicked() {
+                        props.tab = i as u8;
+                    }
+                }
+            });
+            ui.separator();
+        }
+        let row = |ui: &mut Ui, key: String, value: String| {
+            ui.label(RichText::new(key).color(p.dim));
+            ui.add(egui::Label::new(RichText::new(value).color(p.fg)).wrap());
+            ui.end_row();
+        };
+        let contents = |usage: Option<(u64, u64, u64)>| match usage {
+            None => tr("Counting…"),
+            Some((files, dirs, bytes)) => format!(
+                "{}, {} · {}",
+                trn("%n files", files as usize),
+                trn("%n folders", dirs as usize),
+                crate::files::human_size(bytes)
+            ),
+        };
+        let info = match &props.info {
+            Some(Ok(i)) => Some(i.clone()),
+            Some(Err(e)) => {
+                ui.label(RichText::new(e.as_str()).color(p.red));
+                None
+            }
+            None if single => {
+                ui.spinner();
+                None
+            }
+            None => None,
+        };
+        match (props.tab, info) {
+            (0, _) if !single => {
+                egui::Grid::new("props-many")
+                    .num_columns(2)
+                    .spacing([16.0, 6.0])
+                    .show(ui, |ui| {
+                        row(ui, tr("Contents"), contents(props.usage));
+                        row(
+                            ui,
+                            tr("Location"),
+                            first.parent().unwrap_or(first).display().to_string(),
+                        );
+                    });
+            }
+            (0, Some(i)) => {
+                egui::Grid::new("props-general")
+                    .num_columns(2)
+                    .spacing([16.0, 6.0])
+                    .show(ui, |ui| {
+                        let kind = if i.is_dir {
+                            tr("Folder")
+                        } else {
+                            mime.clone().unwrap_or_else(|| tr("File"))
+                        };
+                        row(ui, tr("Type"), kind);
+                        row(
+                            ui,
+                            tr("Location"),
+                            first.parent().unwrap_or(first).display().to_string(),
+                        );
+                        if let Some(target) = &i.link {
+                            row(ui, tr("Link to"), target.display().to_string());
+                        }
+                        if i.is_dir {
+                            row(ui, tr("Contents"), contents(props.usage));
+                        } else {
+                            row(
+                                ui,
+                                tr("Size"),
+                                format!(
+                                    "{} ({} {})",
+                                    crate::files::human_size(i.size),
+                                    i.size,
+                                    tr("bytes")
+                                ),
+                            );
+                            row(ui, tr("On disk"), crate::files::human_size(i.on_disk));
+                        }
+                        for (key, time) in [
+                            (tr("Modified"), i.modified),
+                            (tr("Accessed"), i.accessed),
+                            (tr("Created"), i.created),
+                        ] {
+                            if let Some(t) = time {
+                                row(ui, key, crate::files::format_time(t));
+                            }
+                        }
+                        if let Some(free) = i.free {
+                            row(ui, tr("Free space"), crate::files::human_size(free));
+                        }
+                    });
+            }
+            (1, Some(i)) => {
+                egui::Grid::new("props-owner")
+                    .num_columns(2)
+                    .spacing([16.0, 6.0])
+                    .show(ui, |ui| {
+                        row(ui, tr("Owner"), i.owner.clone());
+                        row(ui, tr("Group"), i.group.clone());
+                    });
+                ui.add_space(8.0);
+                let mut mode = i.mode;
+                egui::Grid::new("props-mode")
+                    .num_columns(4)
+                    .spacing([18.0, 6.0])
+                    .show(ui, |ui| {
+                        ui.label("");
+                        for h in [
+                            tr("Read"),
+                            tr("Write"),
+                            if i.is_dir { tr("Enter") } else { tr("Run") },
+                        ] {
+                            ui.label(RichText::new(h).color(p.dim));
+                        }
+                        ui.end_row();
+                        for (who, shift) in [(tr("Owner"), 6), (tr("Group"), 3), (tr("Others"), 0)]
+                        {
+                            ui.label(RichText::new(who).color(p.dim));
+                            for bit in [4u32, 2, 1] {
+                                let mask = bit << shift;
+                                let mut on = mode & mask != 0;
+                                if ui
+                                    .add_enabled(i.mine, egui::Checkbox::without_text(&mut on))
+                                    .changed()
+                                {
+                                    mode = if on { mode | mask } else { mode & !mask };
+                                }
+                            }
+                            ui.end_row();
+                        }
+                    });
+                ui.add_space(4.0);
+                ui.label(
+                    RichText::new(format!(
+                        "{}   {:03o}",
+                        crate::props::mode_string(mode),
+                        mode & 0o777
+                    ))
+                    .monospace()
+                    .color(p.fg),
+                );
+                if !i.is_dir {
+                    ui.add_space(6.0);
+                    let mut exec = mode & 0o100 != 0;
+                    if ui
+                        .add_enabled(
+                            i.mine,
+                            egui::Checkbox::new(&mut exec, tr("Allow running as a program")),
+                        )
+                        .changed()
+                    {
+                        mode = crate::props::executable(mode, exec);
+                    }
+                }
+                if !i.mine {
+                    ui.add_space(4.0);
+                    ui.label(
+                        RichText::new(tr("Only %1 can change these.").replace("%1", &i.owner))
+                            .color(p.dim)
+                            .size(12.0),
+                    );
+                }
+                if mode != i.mode {
+                    new_mode = Some(mode);
+                }
+            }
+            (2, Some(_)) => {
+                for (which, (label, tool)) in SUMS.iter().enumerate() {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(*label).color(p.dim));
+                        match &props.sums[which] {
+                            None => {
+                                if ui.button(tr("Calculate")).clicked() {
+                                    props.sums[which] = Some(None);
+                                    let (tx, ctx, path, tool) =
+                                        (tx.clone(), ctx.clone(), first.clone(), tool.to_string());
+                                    std::thread::spawn(move || {
+                                        let result = crate::props::checksum(&path, &tool);
+                                        let _ = tx.send(Loaded::Sum {
+                                            path,
+                                            which,
+                                            result,
+                                        });
+                                        ctx.request_repaint();
+                                    });
+                                }
+                            }
+                            Some(None) => {
+                                ui.spinner();
+                            }
+                            Some(Some(Ok(sum))) => {
+                                ui.add(
+                                    egui::Label::new(
+                                        RichText::new(sum.as_str())
+                                            .monospace()
+                                            .size(12.0)
+                                            .color(p.fg),
+                                    )
+                                    .wrap(),
+                                );
+                            }
+                            Some(Some(Err(e))) => {
+                                ui.label(RichText::new(e.as_str()).color(p.red));
+                            }
+                        }
+                    });
+                }
+                ui.add_space(8.0);
+                ui.add(
+                    TextEdit::singleline(&mut props.verify)
+                        .hint_text(tr("Paste a checksum to compare"))
+                        .desired_width(f32::INFINITY)
+                        .margin(Margin::symmetric(8, 5)),
+                );
+                let wanted = props.verify.trim().to_lowercase();
+                if !wanted.is_empty() {
+                    let matched = SUMS.iter().enumerate().find(
+                        |(w, _)| matches!(&props.sums[*w], Some(Some(Ok(sum))) if *sum == wanted),
+                    );
+                    let computed = props.sums.iter().any(|s| matches!(s, Some(Some(Ok(_)))));
+                    match matched {
+                        Some((_, (label, _))) => {
+                            ui.label(
+                                RichText::new(tr("Matches the %1 checksum").replace("%1", label))
+                                    .color(p.green),
+                            );
+                        }
+                        None if computed => {
+                            ui.label(RichText::new(tr("Doesn't match")).color(p.red));
+                        }
+                        None => {
+                            ui.label(
+                                RichText::new(tr("Calculate a checksum to compare")).color(p.dim),
+                            );
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+        if let Some(e) = &props.error {
+            ui.add_space(4.0);
+            ui.label(RichText::new(e.as_str()).color(p.red));
+        }
+        new_mode
+    }
+
     fn ask_extract(&mut self, path: PathBuf) {
         self.dialog = Some(Dialog::Extract {
             path: path.clone(),
@@ -1618,6 +1997,27 @@ impl App {
                     ctx.request_repaint();
                 });
             }
+            Action::Properties(paths) => self.open_properties(paths),
+            Action::SetExecutable(path, mode, on) => {
+                match crate::props::set_mode(&path, crate::props::executable(mode, on)) {
+                    Ok(()) => {
+                        self.status = Some((
+                            if on {
+                                tr("%1 can run as a program")
+                            } else {
+                                tr("%1 no longer runs as a program")
+                            }
+                            .replace(
+                                "%1",
+                                &path.file_name().unwrap_or_default().to_string_lossy(),
+                            ),
+                            false,
+                        ));
+                        self.reload(Some(path));
+                    }
+                    Err(message) => self.error(message),
+                }
+            }
             Action::AskCompress => {
                 let paths = self.targets();
                 if !paths.is_empty() {
@@ -1812,6 +2212,14 @@ impl App {
             Key::PageUp => return self.move_cursor(-page, m),
             Key::Home => return self.move_cursor(isize::MIN / 2, m),
             Key::End => return self.move_cursor(isize::MAX / 2, m),
+            Key::Enter if m.alt => {
+                let targets = self.targets();
+                Some(Action::Properties(if targets.is_empty() {
+                    vec![self.cwd.clone()]
+                } else {
+                    targets
+                }))
+            }
             Key::Enter => Some(Action::Open),
             // Space opens, unless it is part of a name being typed to jump to it.
             Key::Space if self.jump.0.is_empty() || now - self.jump.1 > 1.0 => Some(Action::Open),
@@ -2796,6 +3204,28 @@ impl App {
         if ui.button(tr("Compress…")).clicked() {
             self.pending.push(Action::AskCompress);
         }
+        ui.separator();
+        // Scripts and programs: run them, or stop them running, in one click.
+        if let [path] = &targets[..]
+            && let Some(e) = self.entries.iter().find(|e| &e.path == path && !e.is_dir)
+        {
+            let on = e.mode & 0o111 == 0;
+            let label = if on {
+                tr("Make Executable")
+            } else {
+                tr("Make Not Executable")
+            };
+            if ui.button(label).clicked() {
+                self.pending
+                    .push(Action::SetExecutable(path.clone(), e.mode, on));
+            }
+        }
+        if ui
+            .add(egui::Button::new(tr("Properties")).shortcut_text("Alt+Enter"))
+            .clicked()
+        {
+            self.pending.push(Action::Properties(targets.clone()));
+        }
         let folders: Vec<PathBuf> = self
             .place_targets()
             .into_iter()
@@ -2851,6 +3281,12 @@ impl App {
                 true,
             ),
             (tr("Refresh"), "F5", Action::Refresh, true),
+            (
+                tr("Properties"),
+                "Alt+Enter",
+                Action::Properties(vec![self.cwd.clone()]),
+                true,
+            ),
         ] {
             if ui
                 .add_enabled(enabled, egui::Button::new(label).shortcut_text(keys))
@@ -2873,6 +3309,13 @@ impl App {
         // Unsaved-changes answer: Some(Some(then)) saves first, Some(None) discards.
         let mut unsaved: Option<Option<AfterSave>> = None;
         let mut unsaved_quit = false;
+        // A permission change made in Properties.
+        let mut mode_change: Option<u32> = None;
+        let tx = self.load_tx.clone();
+        let mime = match &*dialog {
+            Dialog::Properties(props) => self.thumbs.mime_for(&props.paths[0]).map(String::from),
+            _ => None,
+        };
         // Extract answer: Some(false) extracts here, Some(true) asks where.
         let mut extract: Option<bool> = None;
         let frame = egui::Frame::popup(&ctx.global_style())
@@ -2909,6 +3352,19 @@ impl App {
                             ui.label(RichText::new(e.as_str()).color(p.red));
                         }
                         confirm = enter;
+                    }
+                    Dialog::Properties(props) => {
+                        ui.set_width(460.0);
+                        mode_change = Self::properties_ui(ui, props, &p, &tx, ctx, mime.clone());
+                        ui.add_space(10.0);
+                        // In a row of its own, or right_to_left takes all the height there is.
+                        ui.horizontal(|ui| {
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                if ui.button(tr("Close")).clicked() || enter {
+                                    close = true;
+                                }
+                            });
+                        });
                     }
                     Dialog::Extract { path, listing } => {
                         let name = path.file_name().unwrap_or_default().to_string_lossy();
@@ -3065,7 +3521,10 @@ impl App {
                         ui.label(RichText::new(tr("Another program saved it after you opened it here. Overwrite its changes with yours?")).color(p.fg));
                     }
                 }
-                if !matches!(dialog, Dialog::Help | Dialog::Unsaved { .. } | Dialog::Extract { .. }) {
+                if !matches!(
+                    dialog,
+                    Dialog::Help | Dialog::Unsaved { .. } | Dialog::Extract { .. } | Dialog::Properties(_)
+                ) {
                     ui.add_space(10.0);
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         let label = match dialog {
@@ -3101,6 +3560,22 @@ impl App {
                     });
                 }
             });
+        if let Some(mode) = mode_change
+            && let Some(Dialog::Properties(props)) = &mut self.dialog
+            && let Some(Ok(info)) = &mut props.info
+        {
+            match crate::props::set_mode(&info.path, mode) {
+                Ok(()) => {
+                    info.mode = mode;
+                    props.error = None;
+                    let path = info.path.clone();
+                    if path.parent() == Some(self.cwd.as_path()) {
+                        self.reload(Some(path));
+                    }
+                }
+                Err(message) => props.error = Some(message),
+            }
+        }
         if let Some(choose) = extract
             && let Some(Dialog::Extract { path, .. }) = self.dialog.take()
         {
@@ -3259,6 +3734,7 @@ impl App {
             Some(Dialog::Help)
             | Some(Dialog::Unsaved { .. })
             | Some(Dialog::Extract { .. })
+            | Some(Dialog::Properties(_))
             | None => {}
         }
     }
@@ -3278,6 +3754,31 @@ impl App {
         while let Ok(loaded) = self.load_rx.try_recv() {
             match loaded {
                 Loaded::Dir(load) => self.loaded(load),
+                Loaded::Info { path, result } => {
+                    if let Some(Dialog::Properties(p)) = &mut self.dialog
+                        && p.paths == [path]
+                    {
+                        p.info = Some(result);
+                    }
+                }
+                Loaded::Usage { paths, counts } => {
+                    if let Some(Dialog::Properties(p)) = &mut self.dialog
+                        && p.paths == paths
+                    {
+                        p.usage = Some(counts);
+                    }
+                }
+                Loaded::Sum {
+                    path,
+                    which,
+                    result,
+                } => {
+                    if let Some(Dialog::Properties(p)) = &mut self.dialog
+                        && p.paths == [path]
+                    {
+                        p.sums[which] = Some(Some(result));
+                    }
+                }
                 Loaded::Picked { paths, result } => match result {
                     Ok(Some(dest)) => self.apply(Action::Extract {
                         paths,
@@ -3845,6 +4346,7 @@ impl App {
                             is_link: false,
                             size: 0,
                             modified: None,
+                            mode: 0,
                         };
                         let icon = egui::text::LayoutJob::simple_singleline(
                             files::glyph(&entry).to_string(),
@@ -4134,6 +4636,7 @@ fn help(ui: &mut Ui, p: &Palette) {
                 ("Ctrl+Wheel / Ctrl+± / Ctrl+0", "Zoom"),
                 ("F4", "Open Terminal Here"),
                 ("F5", "Refresh"),
+                ("Alt+Enter", "Properties"),
                 ("Ctrl+S", "Save (in the text editor)"),
                 ("Esc / Ctrl+W", "Close the text editor"),
                 ("Ctrl+F / F3", "Find in the text editor"),
@@ -4539,5 +5042,79 @@ mod archive_tests {
         assert!(elsewhere.join("trip/plan.md").exists());
         assert_eq!(app.cwd, elsewhere);
         assert!(app.selected.contains(&elsewhere.join("trip")));
+    }
+}
+
+#[cfg(test)]
+mod props_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn settle(ctx: &egui::Context, app: &mut App) {
+        for _ in 0..30 {
+            std::thread::sleep(Duration::from_millis(10));
+            let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
+                app.poll(ui.ctx());
+                app.draw(ui);
+            });
+            out.textures_delta.clear();
+        }
+    }
+
+    #[test]
+    fn properties_show_facts_and_make_scripts_executable() {
+        let dir = std::env::temp_dir().join(format!("ferry-props-ui-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("box")).unwrap();
+        std::fs::write(dir.join("box/a.txt"), "12345").unwrap();
+        std::fs::write(dir.join("run.sh"), "echo hi\n").unwrap();
+        std::fs::set_permissions(dir.join("run.sh"), std::fs::Permissions::from_mode(0o644))
+            .unwrap();
+        let ctx = egui::Context::default();
+        let mut app = App::new(&ctx, dir.clone(), None);
+        settle(&ctx, &mut app);
+
+        // The listing knows the mode, so the menu can offer Make Executable.
+        let entry = app.entries.iter().find(|e| e.name == "run.sh").unwrap();
+        assert_eq!(entry.mode, 0o644);
+        app.apply(Action::SetExecutable(dir.join("run.sh"), entry.mode, true));
+        settle(&ctx, &mut app);
+        assert_eq!(
+            std::fs::metadata(dir.join("run.sh"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o755
+        );
+        assert_eq!(
+            app.entries
+                .iter()
+                .find(|e| e.name == "run.sh")
+                .unwrap()
+                .mode,
+            0o755
+        );
+
+        // Properties of a folder count what's inside in the background.
+        app.apply(Action::Properties(vec![dir.join("box")]));
+        settle(&ctx, &mut app);
+        let Some(Dialog::Properties(props)) = &app.dialog else {
+            panic!("no dialog")
+        };
+        assert!(matches!(&props.info, Some(Ok(i)) if i.is_dir));
+        assert_eq!(props.usage, Some((1, 0, 5)));
+
+        // Closing it stops its work; a new one starts fresh.
+        app.dialog = None;
+        app.apply(Action::Properties(vec![
+            dir.join("run.sh"),
+            dir.join("box"),
+        ]));
+        settle(&ctx, &mut app);
+        let Some(Dialog::Properties(props)) = &app.dialog else {
+            panic!("no dialog")
+        };
+        assert_eq!(props.usage, Some((2, 0, 13)));
     }
 }

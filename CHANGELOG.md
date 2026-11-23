@@ -15,6 +15,11 @@ All notable changes to Ferry are documented here. The format follows
   bsdtar (libarchive, which every Arch system has), so zip, 7z, rar, tar in every compression,
   iso, cpio and deb open, as do single compressed files (`.gz`, `.xz`, `.zst`, `.bz2`, `.lz4`).
   Work happens beside the result and is renamed into place, so a failure leaves nothing behind.
+- Properties (Alt+Enter, or in the right-click menu): type, location, size and size on disk,
+  a folder's contents counted in the background, dates, owner and group, read/write/run
+  permissions for owner, group and others, and SHA-256/MD5 checksums with a paste-to-compare
+  field. Several selected items show their combined contents.
+- *Make Executable* / *Make Not Executable* in the file menu, for scripts and programs.
 - Archives are recognized by their whole suffix (`.tar.zst`, `.tgz`, `.cbz`…) and get the
   archive icon.
 

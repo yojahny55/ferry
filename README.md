@@ -61,6 +61,9 @@ background so a sleeping NAS never freezes the window, and the app starts instan
 - **Compress and extract** zip, 7z, rar, tar.gz/zst/xz, iso and more, with nothing to install:
   opening an archive shows what's inside first, and extracting never scatters files or
   overwrites anything. *Extract To…* picks the destination with the desktop's folder picker, and *Compress…* makes zip, tar.zst, tar.gz, tar.xz or 7z.
+- **Properties** (Alt+Enter): size, size on disk, folder contents, dates, owner, permissions
+  you can change, and checksums to verify a download. *Make Executable* is one click away in
+  the file menu.
 - **Safe file operations**: paste never overwrites (`name (1).ext`), Delete moves to the trash,
   and only Shift+Delete deletes, after asking.
 - **Never blocks on slow disks**: folder loading and change checks run in the background, so an
@@ -183,6 +186,7 @@ Press `?` in the app for this list.
 | Ctrl+0 | Reset zoom |
 | F4 | Open a terminal here |
 | F5 | Refresh |
+| Alt+Enter | Properties |
 | ? | Keyboard shortcuts |
 | Ctrl+S | Save (text editor) |
 | Esc / Ctrl+W | Close the text editor |
