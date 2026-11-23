@@ -15,6 +15,14 @@ All notable changes to Ferry are documented here. The format follows
   changes asks first. Files that aren't valid UTF-8 open read-only; binary files and files over
   5 MiB open in the default app.
 - *Open in Text Editor* and *Open With Default App* in the file context menu.
+- Search in subfolders (Ctrl+Shift+F), by name or by contents, built on ripgrep's crates:
+  parallel, respects `.gitignore` and hidden files unless asked not to, skips binary files,
+  streams results, and cancels a search as soon as the query changes. Names are matched fuzzily
+  with nucleo. Contents results show the matching lines and open the file at that line. Pressing
+  Enter in the filter when nothing in the folder matches searches the subfolders.
+- In the text editor: syntax highlighting colored from the Omarchy theme, a find bar (Ctrl+F,
+  Enter / Shift+Enter, F3), and a rendered Markdown preview (Ctrl+E), which Markdown files open in.
+- *New Text File…* (Ctrl+Alt+N).
 
 ## [0.1.1] - 2026-11-23
 

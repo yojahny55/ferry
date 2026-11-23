@@ -36,10 +36,17 @@ background so a sleeping NAS never freezes the window, and the app starts instan
   freedesktop thumbnail cache, so previews other apps already made appear instantly.
 - **Bookmarks** you can drag folders onto or add with **+**, shared with GTK's bookmarks, so
   they also show up in the desktop's file pickers.
-- **A built-in text editor** for notes, Markdown, code and config files: Enter opens them in
-  Ferry with line numbers and undo, Ctrl+S saves, Esc goes back. Saving is atomic, keeps file
-  permissions, and won't overwrite changes another program made in the meantime. Images,
-  videos and documents still open in your default apps.
+- **Fast search below any folder**, by name or inside files (Ctrl+Shift+F). It uses the
+  same engine as ripgrep and fd: every core walks the folders, `.gitignore`d and hidden files are
+  skipped unless you ask, binary files are never read, and results stream in as they're found.
+  Names match fuzzily and are ranked like fzf (with Helix's
+  [nucleo](https://github.com/helix-editor/nucleo)), so `trp plan` finds `trips/lisbon/plan.md`.
+  A contents match opens the file at that line. No indexer runs in the background.
+- **A built-in text editor** for notes, Markdown, code and config files: syntax highlighting in
+  your theme's colors, find (Ctrl+F), a rendered Markdown preview (Ctrl+E), line numbers, and
+  undo. Ctrl+S saves, Esc goes back. Saving is atomic, keeps file permissions, and won't
+  overwrite changes another program made in the meantime. Images, videos and documents still
+  open in your default apps.
 - **Drag files out** into other apps (a browser, a chat, another file manager) through native Wayland drag-and-drop.
 - **Safe file operations**: paste never overwrites (`name (1).ext`), Delete moves to the trash,
   and only Shift+Delete deletes, after asking.
@@ -114,7 +121,8 @@ Press `?` in the app for this list.
 | Alt+Up | Parent folder |
 | Alt+Home | Home folder |
 | Ctrl+L | Edit the path |
-| Ctrl+F | Filter |
+| Ctrl+F | Filter this folder |
+| Ctrl+Shift+F | Search in subfolders (Tab switches names / contents, Alt+Enter shows a result in its folder) |
 | a–z | Jump to a name |
 | Ctrl+C / Ctrl+X / Ctrl+V | Copy, cut, paste |
 | Ctrl+Alt+C | Copy path |
@@ -122,6 +130,7 @@ Press `?` in the app for this list.
 | Del | Move to trash |
 | Shift+Del | Delete permanently |
 | Ctrl+Shift+N | New folder |
+| Ctrl+Alt+N | New text file |
 | Ctrl+D | Bookmark the selected folders, or this one |
 | Ctrl+A | Select all |
 | Ctrl+H | Show hidden files |
@@ -133,6 +142,8 @@ Press `?` in the app for this list.
 | ? | Keyboard shortcuts |
 | Ctrl+S | Save (text editor) |
 | Esc / Ctrl+W | Close the text editor |
+| Ctrl+F, Enter / Shift+Enter, F3 | Find in the text editor, next / previous match |
+| Ctrl+E | Markdown preview or source |
 | Ctrl+Q | Quit (asks first if there are unsaved changes) |
 
 ## Files Ferry reads and writes
@@ -158,7 +169,11 @@ single JSON file; see [CONTRIBUTING.md](CONTRIBUTING.md#translations).
 - No tabs, split view, or undo yet.
 - Right-to-left languages aren't laid out right to left yet.
 - *Open with…* (choosing among apps) and file properties aren't there yet.
-- The text editor has no search, syntax highlighting or Markdown preview yet, and edits files up to 5 MiB.
+- The text editor has no replace or go-to-line yet, edits files up to 5 MiB, and highlights
+  files up to 256 KiB. Links in the Markdown preview aren't clickable, and images show their
+  description.
+- Search reads the disk each time rather than keeping an index, so a contents search of a whole
+  home folder takes about a second; files over 50 MiB aren't searched inside.
 
 See the [issues](https://github.com/yojahny55/ferry/issues) for what's planned, and feel free to
 open one for what you'd like.
@@ -177,6 +192,9 @@ Contributions are welcome: bug reports, translations, and code. Start with
 ## Credits
 
 - Built with [egui](https://github.com/emilk/egui) and [eframe](https://github.com/emilk/egui/tree/main/crates/eframe).
+- Search uses [ripgrep](https://github.com/BurntSushi/ripgrep)'s `ignore` and `grep` crates and
+  [nucleo](https://github.com/helix-editor/nucleo); the editor uses
+  [syntect](https://github.com/trishume/syntect) and [pulldown-cmark](https://github.com/pulldown-cmark/pulldown-cmark).
 - Theme following is modeled on Omarchy's own apps, such as [Omacut](https://github.com/omacom-io/omacut) (MIT, David Heinemeier Hansson).
 - Inspired by KDE's [Dolphin](https://apps.kde.org/dolphin/).
 

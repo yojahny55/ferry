@@ -4,7 +4,10 @@ mod app;
 mod dnd;
 mod editor;
 mod files;
+mod highlight;
 mod i18n;
+mod markdown;
+mod search;
 mod theme;
 mod thumbs;
 

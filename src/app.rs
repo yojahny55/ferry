@@ -15,6 +15,7 @@ use eframe::egui::{
 
 use crate::files::{self, Entry, Kind, SortKey};
 use crate::i18n::{self, tr, trn};
+use crate::search;
 use crate::theme::{Palette, Theme};
 
 const ROW: f32 = 28.0;
@@ -28,6 +29,10 @@ enum Dialog {
         error: Option<String>,
     },
     NewFolder {
+        text: String,
+        error: Option<String>,
+    },
+    NewFile {
         text: String,
         error: Option<String>,
     },
@@ -60,6 +65,18 @@ enum Action {
     AskDelete,
     AskRename,
     AskNewFolder,
+    AskNewFile,
+    /// Search below the shown folder.
+    Search,
+    CloseSearch,
+    /// Open a search result; `line` opens a contents match in the editor at that line.
+    OpenFound {
+        path: PathBuf,
+        is_dir: bool,
+        line: Option<u64>,
+    },
+    /// Show a file in its folder, selected.
+    Reveal(PathBuf),
     Copy,
     Cut,
     Paste,
@@ -118,6 +135,32 @@ enum Loaded {
         text: String,
         result: Result<Option<SystemTime>, crate::editor::SaveError>,
     },
+}
+
+/// A search below a folder, shown in place of the folder.
+struct SearchView {
+    root: PathBuf,
+    text: String,
+    mode: search::Mode,
+    everything: bool,
+    hits: Vec<search::Hit>,
+    sorted: bool,
+    done: bool,
+    /// When the text last changed: the search runs once typing pauses.
+    typed: Option<f64>,
+    /// Row under the keyboard cursor, in the list of results and their lines.
+    cursor: usize,
+    scroll: bool,
+    focus: bool,
+    /// Scroll offset and height of the results, for keeping the cursor in view.
+    viewport: (f32, f32),
+}
+
+/// A row of search results: a file or folder, or one matching line of a file.
+#[derive(Clone, Copy)]
+enum Row {
+    Hit(usize),
+    Line(usize, usize),
 }
 
 struct Clip {
@@ -189,6 +232,15 @@ pub struct App {
     saved_settings: String,
     editor: Option<crate::editor::Editor>,
     focus_editor: bool,
+    /// The syntax colors made from the palette they were made from.
+    code_theme: Option<(Palette, syntect::highlighting::Theme)>,
+    /// The editor's last highlighted text, by a hash of what went into it.
+    editor_layout: Option<(u64, egui::text::LayoutJob)>,
+    search: Option<SearchView>,
+    search_id: u64,
+    search_progress: Arc<search::Progress>,
+    search_tx: Sender<search::Update>,
+    search_rx: Receiver<search::Update>,
     after_save: Option<AfterSave>,
     /// Set once quitting has been confirmed, so the close request goes through.
     allow_close: bool,
@@ -200,6 +252,7 @@ impl App {
         i18n::set(&language);
         let (tx, rx) = channel();
         let (load_tx, load_rx) = channel();
+        let (search_tx, search_rx) = channel();
         let mut app = App {
             ctx: ctx.clone(),
             theme: Theme::new(ctx),
@@ -251,6 +304,13 @@ impl App {
             saved_settings: String::new(),
             editor: None,
             focus_editor: false,
+            code_theme: None,
+            editor_layout: None,
+            search: None,
+            search_id: 0,
+            search_progress: Arc::default(),
+            search_tx,
+            search_rx,
             after_save: None,
             allow_close: false,
         };
@@ -375,6 +435,7 @@ impl App {
     // ----- Folders -------------------------------------------------------------------------
 
     fn go(&mut self, path: PathBuf, select: Option<PathBuf>, history: bool) {
+        self.close_search();
         self.load(path, select, history, true);
     }
 
@@ -678,7 +739,14 @@ impl App {
     fn open(&mut self, path: PathBuf) {
         if self.is_folder(&path) {
             self.go(path, None, true);
-        } else if crate::editor::wants(self.thumbs.mime_for(&path)) {
+        } else {
+            self.open_file(path);
+        }
+    }
+
+    /// Text in the built-in editor, everything else in its default app.
+    fn open_file(&mut self, path: PathBuf) {
+        if crate::editor::wants(self.thumbs.mime_for(&path)) {
             self.open_editor(path, false);
         } else {
             self.open_external(path);
@@ -828,12 +896,23 @@ impl App {
         self.ctx.send_viewport_cmd(egui::ViewportCommand::Close);
     }
 
-    /// The editor in place of the folder: a header with the file's name and actions, and the
-    /// text with line numbers.
+    /// The editor in place of the folder: a header with the file's name and actions, a find
+    /// bar, and the text with line numbers, highlighted, or Markdown rendered.
     fn editor_view(&mut self, ui: &mut Ui) {
         let p = self.p();
         let z = self.zoom_editor;
+        if self
+            .code_theme
+            .as_ref()
+            .is_none_or(|(made_from, _)| *made_from != p)
+        {
+            self.code_theme = Some((p, crate::highlight::theme(&p)));
+        }
+        let radius = self.theme.radius().min(6);
         let Some(editor) = self.editor.as_mut() else {
+            return;
+        };
+        let Some((_, code_theme)) = self.code_theme.as_ref() else {
             return;
         };
         let (dirty, read_only, saving, loading) = (
@@ -842,6 +921,7 @@ impl App {
             editor.saving,
             editor.loading,
         );
+        let markdown = crate::markdown::is_markdown(&editor.path);
         let path = editor.path.clone();
         let mut action = None;
         ui.horizontal(|ui| {
@@ -878,6 +958,23 @@ impl App {
                 if ui.button(tr("Open With Default App")).clicked() {
                     action = Some(Action::OpenExternal(path.clone()));
                 }
+                if markdown && !loading {
+                    let label = if editor.preview {
+                        tr("Edit")
+                    } else {
+                        tr("Preview")
+                    };
+                    if ui.button(label).on_hover_text("Ctrl+E").clicked() {
+                        editor.preview = !editor.preview;
+                    }
+                }
+                if !editor.preview
+                    && !loading
+                    && icon_button(ui, '\u{f002}', true, &tr("Find (Ctrl+F)")).clicked()
+                {
+                    editor.find.get_or_insert_with(String::new);
+                    editor.focus_find = true;
+                }
             });
         });
         ui.add_space(4.0);
@@ -886,12 +983,125 @@ impl App {
             self.pending.extend(action);
             return;
         }
-        let font = FontId::monospace((14.0 * z).round());
+        if editor.preview {
+            egui::Frame::new()
+                .fill(p.sidebar)
+                .corner_radius(CornerRadius::same(radius))
+                .inner_margin(Margin::symmetric(20, 14))
+                .show(ui, |ui| {
+                    ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
+                        // A readable line length, like a page.
+                        ui.set_max_width(ui.available_width().min(860.0 * z));
+                        crate::markdown::show(ui, &editor.text, &p, code_theme, (15.0 * z).round());
+                    });
+                });
+            self.pending.extend(action);
+            return;
+        }
+
+        // The find bar.
+        if editor.find.is_some() {
+            let (mut changed, mut step, mut close) = (false, None, false);
+            let (count, current) = (editor.found.len(), editor.current);
+            let focus_find = std::mem::take(&mut editor.focus_find);
+            if let Some(find) = editor.find.as_mut() {
+                ui.horizontal(|ui| {
+                    let edit = ui.add(
+                        TextEdit::singleline(find)
+                            .id(egui::Id::unique("ferry-find"))
+                            .hint_text(format!("\u{f002}  {}", tr("Find in this file")))
+                            .desired_width(280.0)
+                            .margin(Margin::symmetric(8, 4)),
+                    );
+                    if focus_find {
+                        edit.request_focus();
+                        // Select what's there, so typing starts a new search.
+                        let mut state = TextEdit::load_state(ui.ctx(), edit.id).unwrap_or_default();
+                        state
+                            .cursor
+                            .set_char_range(Some(egui::text::CCursorRange::two(
+                                egui::text::CCursor::new(0),
+                                egui::text::CCursor::new(find.chars().count()),
+                            )));
+                        state.store(ui.ctx(), edit.id);
+                    }
+                    changed = edit.changed();
+                    if edit.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
+                        step = Some(!ui.input(|i| i.modifiers.shift));
+                        edit.request_focus();
+                    }
+                    let summary = match (count, current) {
+                        (0, _) if find.is_empty() => String::new(),
+                        (0, _) => tr("No matches"),
+                        (n, Some(c)) => tr("%1 of %2")
+                            .replace("%1", &(c + 1).to_string())
+                            .replace("%2", &n.to_string()),
+                        (n, None) => trn("%n matches", n),
+                    };
+                    let color = if count == 0 && !find.is_empty() {
+                        p.red
+                    } else {
+                        p.dim
+                    };
+                    ui.label(RichText::new(summary).color(color));
+                    if icon_button(ui, '\u{f077}', count > 0, &tr("Previous (Shift+Enter)"))
+                        .clicked()
+                    {
+                        step = Some(false);
+                    }
+                    if icon_button(ui, '\u{f078}', count > 0, &tr("Next (Enter)")).clicked() {
+                        step = Some(true);
+                    }
+                    if icon_button(ui, '\u{f00d}', true, &tr("Close (Esc)")).clicked() {
+                        close = true;
+                    }
+                });
+            }
+            if changed {
+                editor.refind();
+                editor.current = None;
+                editor.step(true);
+            }
+            if let Some(forward) = step {
+                editor.step(forward);
+            }
+            if close {
+                editor.find = None;
+                editor.refind();
+            }
+            ui.add_space(4.0);
+        }
+
+        let size = (14.0 * z).round();
+        let font = FontId::monospace(size);
         let numbers = editor.line_numbers();
         let focus = std::mem::take(&mut self.focus_editor);
+        let (found, current) = (editor.found.clone(), editor.current);
+        let select = editor.select.take();
+        let id = egui::Id::unique(("ferry-editor", &path));
+        // Highlighting runs only when the text, the matches or the look changed.
+        let mut cache = self.editor_layout.take();
+        let mut layouter = |ui: &Ui, buf: &dyn egui::TextBuffer, _wrap: f32| {
+            use std::hash::{Hash, Hasher};
+            let text = buf.as_str();
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            (text, &path, &found, current, size.to_bits(), p.fg, p.accent).hash(&mut h);
+            let key = h.finish();
+            let job = match &cache {
+                Some((k, job)) if *k == key => job.clone(),
+                _ => {
+                    let job = crate::highlight::layout(
+                        text, &path, code_theme, &p, &font, &found, current,
+                    );
+                    cache = Some((key, job.clone()));
+                    job
+                }
+            };
+            ui.ctx().fonts_mut(|f| f.layout_job(job))
+        };
         egui::Frame::new()
             .fill(p.sidebar)
-            .corner_radius(CornerRadius::same(self.theme.radius().min(6)))
+            .corner_radius(CornerRadius::same(radius))
             .inner_margin(Margin::symmetric(6, 6))
             .show(ui, |ui| {
                 ScrollArea::both().auto_shrink(false).show(ui, |ui| {
@@ -899,35 +1109,90 @@ impl App {
                         ui.label(RichText::new(numbers).font(font.clone()).color(p.dim));
                         ui.add_space(6.0);
                         let size = ui.available_size();
-                        let response = if read_only {
+                        let output = if read_only {
                             // A &str buffer: selectable and copyable, but not editable.
                             let mut text: &str = &editor.text;
-                            ui.add(
-                                TextEdit::multiline(&mut text)
-                                    .font(font.clone())
-                                    .frame(egui::Frame::NONE)
-                                    .margin(Margin::ZERO)
-                                    .min_size(size),
-                            )
+                            TextEdit::multiline(&mut text)
+                                .id(id)
+                                .frame(egui::Frame::NONE)
+                                .margin(Margin::ZERO)
+                                .desired_width(f32::INFINITY)
+                                .min_size(size)
+                                .layouter(&mut layouter)
+                                .show(ui)
                         } else {
-                            ui.add(
-                                TextEdit::multiline(&mut editor.text)
-                                    .code_editor()
-                                    .font(font.clone())
-                                    .frame(egui::Frame::NONE)
-                                    .margin(Margin::ZERO)
-                                    .lock_focus(true)
-                                    .desired_width(f32::INFINITY)
-                                    .min_size(size),
-                            )
+                            TextEdit::multiline(&mut editor.text)
+                                .id(id)
+                                .code_editor()
+                                .frame(egui::Frame::NONE)
+                                .margin(Margin::ZERO)
+                                .lock_focus(true)
+                                .desired_width(f32::INFINITY)
+                                .min_size(size)
+                                .layouter(&mut layouter)
+                                .show(ui)
                         };
                         if focus {
-                            response.request_focus();
+                            output.response.request_focus();
+                        }
+                        if output.response.changed() && editor.find.is_some() {
+                            editor.refind();
+                        }
+                        // Select a match (or a line) and bring it into view.
+                        if let Some(range) = select {
+                            let chars = |b: usize| {
+                                egui::text::CCursor::new(
+                                    editor.text.get(..b).map_or(0, |t| t.chars().count()),
+                                )
+                            };
+                            let (a, b) = (chars(range.start), chars(range.end));
+                            let mut state = output.state;
+                            // The cursor goes to the match without selecting it: a selection would paint over the highlight.
+                            state
+                                .cursor
+                                .set_char_range(Some(egui::text::CCursorRange::one(a)));
+                            state.store(ui.ctx(), output.response.id);
+                            let rect = output
+                                .galley
+                                .pos_from_cursor(b)
+                                .translate(output.galley_pos.to_vec2());
+                            ui.scroll_to_rect(rect.expand2(vec2(60.0, 0.0)), Some(Align::Center));
                         }
                     });
                 });
             });
+        self.editor_layout = cache;
         self.pending.extend(action);
+    }
+
+    /// Keys while the editor is open: everything else belongs to the text.
+    fn editor_key(&mut self, key: Key, m: Modifiers, ctx: &egui::Context) {
+        let Some(editor) = self.editor.as_mut() else {
+            return;
+        };
+        match key {
+            Key::S if m.command => self.pending.push(Action::SaveEditor(false)),
+            Key::W if m.command => self.pending.push(Action::CloseEditor),
+            Key::Escape if editor.find.is_some() => {
+                editor.find = None;
+                editor.refind();
+                self.focus_editor = true;
+            }
+            Key::Escape => self.pending.push(Action::CloseEditor),
+            Key::F if m.command && !editor.preview && !editor.loading => {
+                editor.find.get_or_insert_with(String::new);
+                editor.focus_find = true;
+            }
+            Key::F3 => editor.step(!m.shift),
+            Key::E if m.command && crate::markdown::is_markdown(&editor.path) => {
+                editor.preview = !editor.preview;
+            }
+            Key::Q if m.command => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+            Key::Plus | Key::Equals if m.command => self.zoom_by(1.25),
+            Key::Minus if m.command => self.zoom_by(0.8),
+            Key::Num0 if m.command => self.zoom_by(0.0),
+            _ => {}
+        }
     }
 
     fn apply(&mut self, action: Action) {
@@ -1090,6 +1355,36 @@ impl App {
                 self.bookmarks = files::bookmarks(&self.bookmarks_file);
             }
             Action::EditText(path) => self.open_editor(path, true),
+            Action::AskNewFile => {
+                self.dialog = Some(Dialog::NewFile {
+                    text: tr("untitled.txt"),
+                    error: None,
+                })
+            }
+            Action::Search => self.open_search(),
+            Action::CloseSearch => self.close_search(),
+            Action::OpenFound { path, is_dir, line } => {
+                if is_dir {
+                    self.go(path, None, true);
+                } else if let Some(line) = line {
+                    let query = self.search.as_ref().map(|s| s.text.trim().to_string());
+                    self.open_editor(path.clone(), true);
+                    if let Some(editor) =
+                        self.editor.as_mut().filter(|e| e.loading && e.path == path)
+                    {
+                        editor.line = Some(line);
+                        editor.find = query;
+                    }
+                } else {
+                    // The results stay, so closing the file comes back to them.
+                    self.open_file(path);
+                }
+            }
+            Action::Reveal(path) => {
+                if let Some(parent) = path.parent().map(PathBuf::from) {
+                    self.go(parent, Some(path), true);
+                }
+            }
             Action::OpenExternal(path) => self.open_external(path),
             Action::CloseEditor => self.request_close_editor(),
             Action::SaveEditor(force) => self.save_editor(force),
@@ -1187,18 +1482,11 @@ impl App {
                     ..
                 } => {
                     if self.editor.is_some() {
-                        match key {
-                            Key::S if m.command => self.pending.push(Action::SaveEditor(false)),
-                            Key::W if m.command => self.pending.push(Action::CloseEditor),
-                            Key::Escape => self.pending.push(Action::CloseEditor),
-                            Key::Q if m.command => {
-                                ctx.send_viewport_cmd(egui::ViewportCommand::Close)
-                            }
-                            Key::Plus | Key::Equals if m.command => self.zoom_by(1.25),
-                            Key::Minus if m.command => self.zoom_by(0.8),
-                            Key::Num0 if m.command => self.zoom_by(0.0),
-                            _ => {}
-                        }
+                        self.editor_key(key, m, &ctx);
+                        continue;
+                    }
+                    if self.search.is_some() {
+                        self.search_key(key, m, &ctx);
                         continue;
                     }
                     // These work even while a text field has focus.
@@ -1207,6 +1495,7 @@ impl App {
                         Key::L if m.command => {
                             self.path_edit = Some(self.cwd.to_string_lossy().into_owned())
                         }
+                        Key::F if m.command && m.shift => self.pending.push(Action::Search),
                         Key::F | Key::I if m.command => self.focus_filter = true,
                         _ => {}
                     }
@@ -1214,7 +1503,7 @@ impl App {
                         self.key(key, m, now);
                     }
                 }
-                _ if self.editor.is_some() => {}
+                _ if self.editor.is_some() || self.search.is_some() => {}
                 Event::Text(t) if !typing => {
                     let fresh = self.jump.0.is_empty() || now - self.jump.1 > 1.0;
                     match t.as_str() {
@@ -1271,6 +1560,7 @@ impl App {
             Key::A if m.command => Some(Action::SelectAll),
             Key::H if m.command => Some(Action::ToggleHidden),
             Key::D if m.command => Some(Action::AddPlaces(self.place_targets())),
+            Key::N if m.command && m.alt => Some(Action::AskNewFile),
             Key::N if m.command && m.shift => Some(Action::AskNewFolder),
             Key::C if m.command && m.alt => Some(Action::CopyPath),
             Key::Plus | Key::Equals if m.command => {
@@ -1417,9 +1707,23 @@ impl App {
                     self.pending.push(Action::ToggleHidden);
                 }
                 ui.add_space(6.0);
+                if icon_toggle(
+                    ui,
+                    '\u{f002}',
+                    self.search.is_some(),
+                    &tr("Search in subfolders (Ctrl+Shift+F)"),
+                )
+                .clicked()
+                {
+                    self.pending.push(if self.search.is_some() {
+                        Action::CloseSearch
+                    } else {
+                        Action::Search
+                    });
+                }
                 let filter = ui.add(
                     TextEdit::singleline(&mut self.filter)
-                        .hint_text(format!("\u{f002}  {}", tr("Filter")))
+                        .hint_text(format!("\u{f0b0}  {}", tr("Filter")))
                         .desired_width(190.0)
                         .margin(Margin::symmetric(8, 5)),
                 );
@@ -1439,6 +1743,10 @@ impl App {
                     && ui.input(|i| i.key_pressed(Key::Enter) || i.key_pressed(Key::ArrowDown))
                 {
                     filter.surrender_focus();
+                    // Nothing here matches: look in the subfolders instead.
+                    if self.view.is_empty() && ui.input(|i| i.key_pressed(Key::Enter)) {
+                        self.pending.push(Action::Search);
+                    }
                 }
                 ui.add_space(8.0);
                 self.path_bar(ui, &p);
@@ -1738,7 +2046,7 @@ impl App {
 
         if self.view.is_empty() {
             let message = match (&self.status, self.filter.is_empty()) {
-                (_, false) => tr("Nothing matches the filter"),
+                (_, false) => tr("Nothing here matches. Press Enter to search the subfolders."),
                 _ if self.loading.is_some() => tr("Loading…"),
                 _ => tr("This folder is empty"),
             };
@@ -2116,6 +2424,7 @@ impl App {
                 Action::AskNewFolder,
                 true,
             ),
+            (tr("New Text File…"), "Ctrl+Alt+N", Action::AskNewFile, true),
             (tr("Paste"), "Ctrl+V", Action::Paste, can_paste),
             (tr("Select All"), "Ctrl+A", Action::SelectAll, true),
             (tr("Open Terminal Here"), "F4", Action::Terminal, true),
@@ -2170,6 +2479,7 @@ impl App {
                 let title = match dialog {
                     Dialog::Rename { .. } => Some(tr("Rename")),
                     Dialog::NewFolder { .. } => Some(tr("New Folder")),
+                    Dialog::NewFile { .. } => Some(tr("New Text File")),
                     _ => None,
                 };
                 if let Some(title) = title {
@@ -2177,7 +2487,9 @@ impl App {
                     ui.add_space(6.0);
                 }
                 match dialog {
-                    Dialog::Rename { text, error, .. } | Dialog::NewFolder { text, error } => {
+                    Dialog::Rename { text, error, .. }
+                    | Dialog::NewFolder { text, error }
+                    | Dialog::NewFile { text, error } => {
                         let edit = ui.add(
                             TextEdit::singleline(text)
                                 .desired_width(f32::INFINITY)
@@ -2256,7 +2568,7 @@ impl App {
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         let label = match dialog {
                             Dialog::Rename { .. } => tr("Rename"),
-                            Dialog::NewFolder { .. } => tr("Create"),
+                            Dialog::NewFolder { .. } | Dialog::NewFile { .. } => tr("Create"),
                             Dialog::ChangedOnDisk => tr("Overwrite"),
                             _ => tr("Delete"),
                         };
@@ -2330,6 +2642,28 @@ impl App {
                     }
                 }
             }
+            Some(Dialog::NewFile { text, .. }) => {
+                let result = files::check_name(&self.cwd, &text, None).and_then(|target| {
+                    std::fs::OpenOptions::new()
+                        .write(true)
+                        .create_new(true)
+                        .open(&target)
+                        .map(|_| target)
+                        .map_err(|e| e.to_string())
+                });
+                match result {
+                    Ok(target) => {
+                        self.reload(Some(target.clone()));
+                        self.open_editor(target, true);
+                    }
+                    Err(error) => {
+                        self.dialog = Some(Dialog::NewFile {
+                            text,
+                            error: Some(error),
+                        })
+                    }
+                }
+            }
             Some(Dialog::NewFolder { text, .. }) => {
                 let result = files::check_name(&self.cwd, &text, None).and_then(|target| {
                     std::fs::create_dir(&target)
@@ -2392,6 +2726,7 @@ impl App {
             }
         }
         let now = ctx.input(|i| i.time);
+        self.poll_search(ctx, now);
         if now - self.last_poll >= 1.0 {
             self.last_poll = now;
             self.theme.poll(ctx);
@@ -2504,6 +2839,8 @@ impl App {
             .show(ui, |ui| {
                 if self.editor.is_some() {
                     self.editor_view(ui);
+                } else if self.search.is_some() {
+                    self.search_view(ui);
                 } else {
                     self.folder(ui);
                 }
@@ -2516,6 +2853,460 @@ impl App {
             self.apply(action);
         }
     }
+}
+
+impl App {
+    /// Starts a search below the shown folder, taking over what the filter had typed.
+    fn open_search(&mut self) {
+        let text = std::mem::take(&mut self.filter);
+        self.rebuild_view();
+        let typed = (!text.trim().is_empty()).then_some(0.0);
+        self.search = Some(SearchView {
+            root: self.cwd.clone(),
+            text,
+            mode: search::Mode::Names,
+            everything: self.show_hidden,
+            hits: Vec::new(),
+            sorted: true,
+            done: true,
+            typed,
+            cursor: 0,
+            scroll: false,
+            focus: true,
+            viewport: (0.0, 0.0),
+        });
+    }
+
+    fn close_search(&mut self) {
+        if self.search.take().is_some() {
+            // Any search still walking stops at its next file.
+            self.search_id += 1;
+            self.search_progress
+                .current
+                .store(self.search_id, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    fn run_search(&mut self) {
+        let Some(s) = self.search.as_mut() else {
+            return;
+        };
+        self.search_id += 1;
+        s.hits.clear();
+        s.cursor = 0;
+        s.sorted = true;
+        let query = search::Query {
+            text: s.text.clone(),
+            mode: s.mode,
+            root: s.root.clone(),
+            everything: s.everything,
+        };
+        if query.text.trim().is_empty() {
+            s.done = true;
+            self.search_progress
+                .current
+                .store(self.search_id, std::sync::atomic::Ordering::SeqCst);
+            return;
+        }
+        s.done = false;
+        let ctx = self.ctx.clone();
+        search::start(
+            query,
+            self.search_id,
+            self.search_progress.clone(),
+            self.search_tx.clone(),
+            move || ctx.request_repaint(),
+        );
+    }
+
+    fn poll_search(&mut self, ctx: &egui::Context, now: f64) {
+        while let Ok(update) = self.search_rx.try_recv() {
+            let current = self.search_id;
+            let Some(s) = self.search.as_mut() else {
+                continue;
+            };
+            match update {
+                search::Update::Hit(id, hit)
+                    if id == current && s.hits.len() < search::MAX_HITS =>
+                {
+                    s.hits.push(hit);
+                    s.sorted = false;
+                }
+                search::Update::Done(id) if id == current => s.done = true,
+                _ => {}
+            }
+        }
+        let due = self
+            .search
+            .as_ref()
+            .and_then(|s| s.typed)
+            .map(|t| now - t >= 0.15);
+        match due {
+            Some(true) => {
+                if let Some(s) = self.search.as_mut() {
+                    s.typed = None;
+                }
+                self.run_search();
+            }
+            Some(false) => ctx.request_repaint_after(Duration::from_millis(150)),
+            None => {}
+        }
+    }
+
+    /// The results as rows: each hit, followed by its matching lines in a contents search.
+    fn search_rows(s: &SearchView) -> Vec<Row> {
+        let mut rows = Vec::with_capacity(s.hits.len());
+        for (i, hit) in s.hits.iter().enumerate() {
+            rows.push(Row::Hit(i));
+            rows.extend((0..hit.lines.len()).map(|l| Row::Line(i, l)));
+        }
+        rows
+    }
+
+    fn search_action(s: &SearchView, row: Row) -> Action {
+        match row {
+            Row::Hit(i) => Action::OpenFound {
+                path: s.hits[i].path.clone(),
+                is_dir: s.hits[i].is_dir,
+                line: None,
+            },
+            Row::Line(i, l) => Action::OpenFound {
+                path: s.hits[i].path.clone(),
+                is_dir: false,
+                line: Some(s.hits[i].lines[l].number),
+            },
+        }
+    }
+
+    fn search_key(&mut self, key: Key, m: Modifiers, ctx: &egui::Context) {
+        let Some(s) = self.search.as_mut() else {
+            return;
+        };
+        let rows = Self::search_rows(s);
+        let last = rows.len().saturating_sub(1);
+        let page = ((s.viewport.1 / (26.0 * self.zoom_list)) as usize).max(1);
+        let mut moved = true;
+        match key {
+            Key::Escape => self.pending.push(Action::CloseSearch),
+            Key::ArrowDown => s.cursor = (s.cursor + 1).min(last),
+            Key::ArrowUp => s.cursor = s.cursor.saturating_sub(1),
+            Key::PageDown => s.cursor = (s.cursor + page).min(last),
+            Key::PageUp => s.cursor = s.cursor.saturating_sub(page),
+            Key::Enter if !rows.is_empty() => {
+                let row = rows[s.cursor.min(last)];
+                self.pending.push(match row {
+                    // Alt+Enter shows a result in its folder instead of opening it.
+                    Row::Hit(i) if m.alt => Action::Reveal(s.hits[i].path.clone()),
+                    _ => Self::search_action(s, row),
+                });
+                moved = false;
+            }
+            Key::F if m.command => s.focus = true,
+            Key::Tab => {
+                s.mode = match s.mode {
+                    search::Mode::Names => search::Mode::Contents,
+                    search::Mode::Contents => search::Mode::Names,
+                };
+                s.typed = Some(0.0);
+                s.focus = true;
+                moved = false;
+            }
+            Key::Q if m.command => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+            Key::L if m.command => {
+                self.pending.push(Action::CloseSearch);
+                self.path_edit = Some(self.cwd.to_string_lossy().into_owned());
+                moved = false;
+            }
+            _ => moved = false,
+        }
+        if moved && let Some(s) = self.search.as_mut() {
+            s.scroll = true;
+        }
+    }
+
+    fn search_view(&mut self, ui: &mut Ui) {
+        let p = self.p();
+        let z = self.zoom_list;
+        let now = ui.input(|i| i.time);
+        let scanned = self
+            .search_progress
+            .scanned
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let Some(s) = self.search.as_mut() else {
+            return;
+        };
+        let mut rerun = false;
+        let mut action = None;
+
+        // The query, what to search, and how it's going.
+        ui.horizontal(|ui| {
+            if ui
+                .add(egui::Button::new(RichText::new("\u{f053}").size(14.0)).frame(false))
+                .on_hover_text(tr("Back to the folder (Esc)"))
+                .clicked()
+            {
+                action = Some(Action::CloseSearch);
+            }
+            let edit = ui.add(
+                TextEdit::singleline(&mut s.text)
+                    .hint_text(format!(
+                        "\u{f002}  {}",
+                        tr("Search in %1").replace("%1", &folder_name(&s.root))
+                    ))
+                    .desired_width(300.0)
+                    .margin(Margin::symmetric(8, 5)),
+            );
+            // The query keeps the keyboard, the way a picker does; arrows move through results.
+            if std::mem::take(&mut s.focus) || edit.lost_focus() {
+                edit.request_focus();
+            }
+            if edit.changed() {
+                s.typed = Some(now);
+            }
+            ui.add_space(6.0);
+            for (mode, label, tip) in [
+                (
+                    search::Mode::Names,
+                    tr("Names"),
+                    tr("Match file and folder names, fuzzily (Tab)"),
+                ),
+                (
+                    search::Mode::Contents,
+                    tr("Contents"),
+                    tr("Look for the text inside files (Tab)"),
+                ),
+            ] {
+                if ui
+                    .selectable_label(s.mode == mode, label)
+                    .on_hover_text(tip)
+                    .clicked()
+                    && s.mode != mode
+                {
+                    s.mode = mode;
+                    rerun = true;
+                }
+            }
+            let eye = if s.everything { '\u{f06e}' } else { '\u{f070}' };
+            if icon_toggle(
+                ui,
+                eye,
+                s.everything,
+                &tr("Include hidden files and what .gitignore skips"),
+            )
+            .clicked()
+            {
+                s.everything = !s.everything;
+                rerun = true;
+            }
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                let n = s.hits.len();
+                let status = if !s.done {
+                    tr("Searching… %1 items looked at").replace("%1", &scanned.to_string())
+                } else if s.text.trim().is_empty() {
+                    String::new()
+                } else if n >= search::MAX_HITS {
+                    tr("Showing the first %1 results").replace("%1", &n.to_string())
+                } else {
+                    trn("%n results", n)
+                };
+                ui.label(RichText::new(status).color(p.dim));
+                if !s.done {
+                    ui.spinner();
+                }
+            });
+        });
+        ui.add_space(4.0);
+        if rerun {
+            s.typed = Some(0.0);
+        }
+
+        if !s.sorted {
+            match s.mode {
+                // Best match first; between equals, the shorter (closer) path.
+                search::Mode::Names => s.hits.sort_by(|a, b| {
+                    b.score
+                        .cmp(&a.score)
+                        .then(a.path.as_os_str().len().cmp(&b.path.as_os_str().len()))
+                        .then(a.path.cmp(&b.path))
+                }),
+                search::Mode::Contents => s.hits.sort_by(|a, b| a.path.cmp(&b.path)),
+            }
+            s.sorted = true;
+        }
+        let rows = Self::search_rows(s);
+        if rows.is_empty() {
+            let message = if s.text.trim().is_empty() {
+                tr("Type to search in %1 and its subfolders").replace("%1", &folder_name(&s.root))
+            } else if !s.done || s.typed.is_some() {
+                tr("Searching…")
+            } else {
+                tr("Nothing found")
+            };
+            ui.centered_and_justified(|ui| {
+                ui.label(RichText::new(message).color(p.dim).size(15.0))
+            });
+            self.pending.extend(action);
+            return;
+        }
+        s.cursor = s.cursor.min(rows.len() - 1);
+
+        let row_h = (26.0 * z).round();
+        let mut area = ScrollArea::vertical().auto_shrink(false);
+        if std::mem::take(&mut s.scroll) {
+            let (offset, height) = s.viewport;
+            let top = s.cursor as f32 * row_h;
+            if top < offset {
+                area = area.vertical_scroll_offset(top);
+            } else if top + row_h > offset + height {
+                area = area.vertical_scroll_offset(top + row_h - height);
+            }
+        }
+        let root = s.root.clone();
+        let output = area.show_rows(ui, row_h, rows.len(), |ui, range| {
+            for r in range {
+                let row = rows[r];
+                let width = ui.available_width();
+                let (rect, resp) = ui.allocate_exact_size(vec2(width, row_h), Sense::click());
+                if r == s.cursor {
+                    ui.painter().rect_filled(rect, 4.0, p.selection);
+                } else if resp.hovered() {
+                    ui.painter().rect_filled(rect, 4.0, p.surface);
+                }
+                let font = FontId::proportional((14.0 * z).round());
+                let mono = FontId::monospace((13.0 * z).round());
+                let job = match row {
+                    Row::Hit(i) => {
+                        let hit = &s.hits[i];
+                        let relative = hit
+                            .path
+                            .strip_prefix(&root)
+                            .unwrap_or(&hit.path)
+                            .to_string_lossy()
+                            .into_owned();
+                        let entry = Entry {
+                            name: hit
+                                .path
+                                .file_name()
+                                .map(|n| n.to_string_lossy().into_owned())
+                                .unwrap_or_default(),
+                            path: hit.path.clone(),
+                            is_dir: hit.is_dir,
+                            is_link: false,
+                            size: 0,
+                            modified: None,
+                        };
+                        let icon = egui::text::LayoutJob::simple_singleline(
+                            files::glyph(&entry).to_string(),
+                            FontId::proportional((16.0 * z).round()),
+                            kind_color(&entry, &p),
+                        );
+                        let galley = ui.painter().layout_job(icon);
+                        ui.painter().galley(
+                            rect.left_center() + vec2(8.0 * z, -galley.size().y / 2.0),
+                            galley,
+                            p.fg,
+                        );
+                        path_job(&relative, &hit.indices, &font, &p)
+                    }
+                    Row::Line(i, l) => line_job(&s.hits[i].lines[l], &mono, &p),
+                };
+                let indent = if matches!(row, Row::Line(..)) {
+                    40.0
+                } else {
+                    34.0
+                } * z;
+                let mut job = job;
+                job.wrap = egui::text::TextWrapping::truncate_at_width(width - indent - 8.0);
+                let galley = ui.painter().layout_job(job);
+                ui.painter().galley(
+                    rect.left_center() + vec2(indent, -galley.size().y / 2.0),
+                    galley,
+                    p.fg,
+                );
+
+                if resp.clicked() {
+                    s.cursor = r;
+                }
+                if resp.double_clicked() {
+                    action = Some(Self::search_action(s, row));
+                }
+                let path = match row {
+                    Row::Hit(i) | Row::Line(i, _) => s.hits[i].path.clone(),
+                };
+                resp.on_hover_text(path.display().to_string())
+                    .context_menu(|ui| {
+                        if ui.button(tr("Open")).clicked() {
+                            action = Some(Self::search_action(s, row));
+                        }
+                        if ui
+                            .add(egui::Button::new(tr("Show in Folder")).shortcut_text("Alt+Enter"))
+                            .clicked()
+                        {
+                            action = Some(Action::Reveal(path.clone()));
+                        }
+                        if ui.button(tr("Copy Path")).clicked() {
+                            ui.ctx().copy_text(path.display().to_string());
+                        }
+                    });
+            }
+        });
+        s.viewport = (output.state.clamped_offset().y, output.inner_rect.height());
+        self.pending.extend(action);
+    }
+}
+
+fn folder_name(path: &Path) -> String {
+    path.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.display().to_string())
+}
+
+/// A result's path, folders dimmed, with the characters the search matched in the accent.
+fn path_job(relative: &str, indices: &[u32], font: &FontId, p: &Palette) -> egui::text::LayoutJob {
+    let name_start = relative.rfind('/').map_or(0, |i| i + 1);
+    let mut job = egui::text::LayoutJob::default();
+    for (n, (b, c)) in relative.char_indices().enumerate() {
+        let color = if indices.contains(&(n as u32)) {
+            p.accent
+        } else if b < name_start {
+            p.dim
+        } else {
+            p.fg
+        };
+        let format = egui::TextFormat {
+            font_id: font.clone(),
+            color,
+            ..Default::default()
+        };
+        job.append(c.encode_utf8(&mut [0; 4]), 0.0, format);
+    }
+    job
+}
+
+/// A matching line: its number, then the text with the matches marked.
+fn line_job(line: &search::Line, font: &FontId, p: &Palette) -> egui::text::LayoutJob {
+    let mut job = egui::text::LayoutJob::default();
+    let plain = |color| egui::TextFormat {
+        font_id: font.clone(),
+        color,
+        ..Default::default()
+    };
+    job.append(&format!("{:>5}  ", line.number), 0.0, plain(p.dim));
+    // Leading indentation only pushes the match out of sight.
+    let trimmed = line.text.len() - line.text.trim_start().len();
+    let mut at = trimmed;
+    for &(start, end) in &line.matches {
+        if start < at || end > line.text.len() {
+            continue;
+        }
+        job.append(&line.text[at..start], 0.0, plain(p.fg));
+        let mut format = plain(crate::theme::on(p.accent));
+        format.background = p.accent;
+        job.append(&line.text[start..end], 0.0, format);
+        at = end;
+    }
+    job.append(&line.text[at..], 0.0, plain(p.fg));
+    job
 }
 
 /// FERRY_DEBUG=1 prints what the app is doing to stderr, for chasing bugs on real hardware.
@@ -2660,6 +3451,7 @@ fn help(ui: &mut Ui, p: &Palette) {
                 ("Alt+Home", "Home folder"),
                 ("Ctrl+L", "Edit the path"),
                 ("Ctrl+F", "Filter"),
+                ("Ctrl+Shift+F", "Search in subfolders"),
                 ("a–z", "Jump to a name"),
                 ("Ctrl+C / Ctrl+X / Ctrl+V", "Copy, cut, paste"),
                 ("Ctrl+Alt+C", "Copy Path"),
@@ -2667,6 +3459,7 @@ fn help(ui: &mut Ui, p: &Palette) {
                 ("Del", "Move to Trash"),
                 ("Shift+Del", "Delete permanently"),
                 ("Ctrl+Shift+N", "New Folder"),
+                ("Ctrl+Alt+N", "New Text File"),
                 ("Ctrl+D", "Add to Bookmarks"),
                 ("Ctrl+A", "Select All"),
                 ("Ctrl+H", "Hidden files"),
@@ -2676,6 +3469,8 @@ fn help(ui: &mut Ui, p: &Palette) {
                 ("F5", "Refresh"),
                 ("Ctrl+S", "Save (in the text editor)"),
                 ("Esc / Ctrl+W", "Close the text editor"),
+                ("Ctrl+F / F3", "Find in the text editor"),
+                ("Ctrl+E", "Markdown preview"),
                 ("?", "Keyboard shortcuts"),
                 ("Ctrl+Q", "Quit"),
             ] {
@@ -2892,5 +3687,72 @@ mod editor_tests {
             "# Notes\n- milk\n"
         );
         assert!(app.editor.is_none(), "closed after saving");
+    }
+}
+
+#[cfg(test)]
+mod search_tests {
+    use super::*;
+
+    fn settle(ctx: &egui::Context, app: &mut App) {
+        for _ in 0..40 {
+            std::thread::sleep(Duration::from_millis(10));
+            let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
+                app.poll(ui.ctx());
+                app.draw(ui);
+            });
+            out.textures_delta.clear();
+        }
+    }
+
+    #[test]
+    fn search_finds_names_and_contents_and_opens_a_line() {
+        let dir = std::env::temp_dir().join(format!("ferry-find-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("trips/lisbon")).unwrap();
+        std::fs::write(
+            dir.join("trips/lisbon/plan.md"),
+            "# Plan\n\nVisit Belem\nEat pasteis\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("todo.txt"), "call mum\n").unwrap();
+        let ctx = egui::Context::default();
+        let mut app = App::new(&ctx, dir.clone(), None);
+        settle(&ctx, &mut app);
+
+        // The filter's text carries over into the search.
+        app.filter = "plan".into();
+        app.apply(Action::Search);
+        settle(&ctx, &mut app);
+        let s = app.search.as_ref().unwrap();
+        assert_eq!(
+            s.hits.first().map(|h| h.path.clone()),
+            Some(dir.join("trips/lisbon/plan.md"))
+        );
+
+        let s = app.search.as_mut().unwrap();
+        s.text = "pasteis".into();
+        s.mode = search::Mode::Contents;
+        s.typed = Some(0.0);
+        settle(&ctx, &mut app);
+        let s = app.search.as_ref().unwrap();
+        assert_eq!(s.hits.len(), 1);
+        assert_eq!(s.hits[0].lines[0].number, 4);
+
+        // Opening the line shows the file at that line, with the word found.
+        let row = App::search_rows(s)[1];
+        let action = App::search_action(s, row);
+        app.apply(action);
+        settle(&ctx, &mut app);
+        let editor = app.editor.as_ref().expect("opened in the editor");
+        assert_eq!(editor.found.first(), Some(&(24..31)));
+        assert_eq!(editor.current, Some(0));
+        assert!(!editor.preview, "opened at a line, so it shows the source");
+
+        // Closing the file returns to the results; navigating away ends the search.
+        app.apply(Action::CloseEditor);
+        assert!(app.search.is_some());
+        app.apply(Action::Up);
+        assert!(app.search.is_none());
     }
 }

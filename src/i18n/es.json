@@ -141,5 +141,42 @@
   "Too large to edit here; opening it with the default app": "Es demasiado grande para editarlo aquí; se abre con la aplicación predeterminada",
   "Not a text file; opening it with the default app": "No es un archivo de texto; se abre con la aplicación predeterminada",
   "Save (in the text editor)": "Guardar (en el editor de texto)",
-  "Close the text editor": "Cerrar el editor de texto"
+  "Close the text editor": "Cerrar el editor de texto",
+  "Edit": "Editar",
+  "Preview": "Vista previa",
+  "Find (Ctrl+F)": "Buscar (Ctrl+F)",
+  "Find in this file": "Buscar en este archivo",
+  "No matches": "Sin coincidencias",
+  "%1 of %2": "%1 de %2",
+  "%n matches": {
+    "one": "%n coincidencia",
+    "other": "%n coincidencias"
+  },
+  "Previous (Shift+Enter)": "Anterior (Mayús+Intro)",
+  "Next (Enter)": "Siguiente (Intro)",
+  "Close (Esc)": "Cerrar (Esc)",
+  "untitled.txt": "sin título.txt",
+  "New Text File": "Nuevo archivo de texto",
+  "New Text File…": "Nuevo archivo de texto…",
+  "Search in subfolders (Ctrl+Shift+F)": "Buscar en subcarpetas (Ctrl+Mayús+F)",
+  "Search in subfolders": "Buscar en subcarpetas",
+  "Nothing here matches. Press Enter to search the subfolders.": "Nada coincide aquí. Pulsa Intro para buscar en las subcarpetas.",
+  "Search in %1": "Buscar en %1",
+  "Names": "Nombres",
+  "Contents": "Contenido",
+  "Include hidden files and what .gitignore skips": "Incluir archivos ocultos y lo que .gitignore omite",
+  "Searching… %1 items looked at": "Buscando… %1 elementos revisados",
+  "Showing the first %1 results": "Mostrando los primeros %1 resultados",
+  "%n results": {
+    "one": "%n resultado",
+    "other": "%n resultados"
+  },
+  "Type to search in %1 and its subfolders": "Escribe para buscar en %1 y sus subcarpetas",
+  "Searching…": "Buscando…",
+  "Nothing found": "No se encontró nada",
+  "Show in Folder": "Mostrar en la carpeta",
+  "Find in the text editor": "Buscar en el editor de texto",
+  "Markdown preview": "Vista previa de Markdown",
+  "Match file and folder names, fuzzily (Tab)": "Coincidencia aproximada con nombres de archivos y carpetas (Tab)",
+  "Look for the text inside files (Tab)": "Buscar el texto dentro de los archivos (Tab)"
 }

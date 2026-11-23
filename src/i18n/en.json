@@ -42,5 +42,13 @@
   "Added %n folders to Bookmarks": {
     "one": "Added %n folder to Bookmarks",
     "other": "Added %n folders to Bookmarks"
+  },
+  "%n matches": {
+    "one": "%n match",
+    "other": "%n matches"
+  },
+  "%n results": {
+    "one": "%n result",
+    "other": "%n results"
   }
 }

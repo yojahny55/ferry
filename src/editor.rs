@@ -5,6 +5,7 @@
 
 use std::fs;
 use std::io;
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -121,6 +122,18 @@ pub struct Editor {
     pub read_only: bool,
     pub loading: bool,
     pub saving: bool,
+    /// Markdown shown rendered rather than as source.
+    pub preview: bool,
+    /// The find bar's text, while it is open.
+    pub find: Option<String>,
+    pub focus_find: bool,
+    /// Byte ranges of the find bar's matches, and which one is current.
+    pub found: Vec<Range<usize>>,
+    pub current: Option<usize>,
+    /// A byte range to select and scroll to on the next frame.
+    pub select: Option<Range<usize>>,
+    /// A line (from 1) to go to once the file has loaded.
+    pub line: Option<u64>,
 }
 
 impl Editor {
@@ -133,6 +146,13 @@ impl Editor {
             read_only: true,
             loading: true,
             saving: false,
+            preview: false,
+            find: None,
+            focus_find: false,
+            found: Vec::new(),
+            current: None,
+            select: None,
+            line: None,
         }
     }
 
@@ -142,6 +162,51 @@ impl Editor {
         self.mtime = mtime;
         self.read_only = read_only;
         self.loading = false;
+        // Markdown opens rendered, unless it was opened to go to a line.
+        self.preview = crate::markdown::is_markdown(&self.path) && self.line.is_none();
+        self.refind();
+        if let Some(line) = self.line.take() {
+            self.go_to_line(line);
+        }
+    }
+
+    /// Recomputes the find bar's matches after the text or the search changed.
+    pub fn refind(&mut self) {
+        self.found = crate::highlight::find_all(&self.text, self.find.as_deref().unwrap_or(""));
+        self.current = self.current.filter(|&c| c < self.found.len());
+    }
+
+    /// Moves to the next match (or the previous one), wrapping around.
+    pub fn step(&mut self, forward: bool) {
+        let n = self.found.len();
+        if n == 0 {
+            return;
+        }
+        let next = match self.current {
+            Some(c) if forward => (c + 1) % n,
+            Some(c) => (c + n - 1) % n,
+            None if forward => 0,
+            None => n - 1,
+        };
+        self.current = Some(next);
+        self.select = Some(self.found[next].clone());
+    }
+
+    /// Puts the cursor on `line` (from 1), on its first match when the find bar has one.
+    pub fn go_to_line(&mut self, line: u64) {
+        let start = if line <= 1 {
+            0
+        } else {
+            self.text
+                .match_indices('\n')
+                .nth(line as usize - 2)
+                .map_or(self.text.len(), |(i, _)| i + 1)
+        };
+        self.current = self.found.iter().position(|r| r.start >= start);
+        self.select = Some(match self.current {
+            Some(c) => self.found[c].clone(),
+            None => start..start,
+        });
     }
 
     pub fn dirty(&self) -> bool {
@@ -299,5 +364,24 @@ mod tests {
         assert_eq!(e.line_numbers(), "1");
         e.text = "1\n2\n".into();
         assert_eq!(e.line_numbers(), "1\n2\n3");
+    }
+
+    #[test]
+    fn finds_steps_and_goes_to_lines() {
+        let mut e = Editor::loading(PathBuf::from("/notes.txt"));
+        e.find = Some("milk".into());
+        e.line = Some(3);
+        e.loaded("milk\nbread\nmore milk\n".into(), None, false);
+        assert_eq!(e.found, [0..4, 16..20]);
+        // Opened at line 3, on that line's match.
+        assert_eq!((e.current, e.select.clone()), (Some(1), Some(16..20)));
+        e.step(true);
+        assert_eq!(e.select, Some(0..4), "wraps to the first match");
+        e.step(false);
+        assert_eq!(e.current, Some(1));
+        e.text.insert_str(0, "milk ");
+        e.refind();
+        assert_eq!(e.found.len(), 3);
+        assert!(!e.preview);
     }
 }
