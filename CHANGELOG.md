@@ -6,6 +6,11 @@ All notable changes to Ferry are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- Pasting text copied in other apps into the editor and text fields, and Copy Path reaching
+  other apps: Ferry was built without the system clipboard, so it only saw its own copies.
+
 ## [0.3.0] - 2026-11-23
 
 ### Added

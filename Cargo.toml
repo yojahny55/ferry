@@ -13,7 +13,7 @@ rust-version = "1.95"
 edition = "2024"
 
 [dependencies]
-eframe = { version = "0.37.0", default-features = false, features = ["glow", "wayland", "x11", "default_fonts"] }
+eframe = { version = "0.37.0", default-features = false, features = ["glow", "wayland", "x11", "default_fonts", "clipboard"] }
 grep-matcher = "0.1.9"
 grep-regex = "0.1.14"
 grep-searcher = "0.1.17"
