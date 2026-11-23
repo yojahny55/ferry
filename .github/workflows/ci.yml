@@ -17,7 +17,7 @@ jobs:
     steps:
       - name: Install toolchain and libraries
         run: pacman -Syu --noconfirm --needed rust base-devel git wayland libxkbcommon libglvnd fontconfig
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/cache@v6
         with:
           path: |
