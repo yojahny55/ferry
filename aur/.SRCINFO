@@ -1,6 +1,6 @@
 pkgbase = ferry-fm
 	pkgdesc = Keyboard-first file manager for Omarchy and Hyprland that follows your theme live
-	pkgver = 0.2.1
+	pkgver = 0.3.0
 	pkgrel = 1
 	url = https://github.com/yojahny55/ferry
 	arch = x86_64
@@ -28,7 +28,7 @@ pkgbase = ferry-fm
 	optdepends = ffmpegthumbnailer: video previews
 	optdepends = lz4: extract single .lz4 files
 	optdepends = xdg-desktop-portal: choose where to extract (Extract To…)
-	source = ferry-0.2.1.tar.gz::https://github.com/yojahny55/ferry/archive/refs/tags/v0.2.1.tar.gz
-	sha256sums = 9123231704ade35cf2c26b7ed4eaf073860d7cda258b9df45882aa174f4baa43
+	source = ferry-0.3.0.tar.gz::https://github.com/yojahny55/ferry/archive/refs/tags/v0.3.0.tar.gz
+	sha256sums = fdbb3f6d2932cdbd155abc53698c242dd2dfd98540af0879e09c61ebcbdcd5e2
 
 pkgname = ferry-fm

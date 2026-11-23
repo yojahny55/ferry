@@ -2,7 +2,7 @@
 
 pkgname=ferry-fm
 _name=ferry
-pkgver=0.2.1
+pkgver=0.3.0
 pkgrel=1
 pkgdesc='Keyboard-first file manager for Omarchy and Hyprland that follows your theme live'
 arch=('x86_64' 'aarch64')
@@ -34,7 +34,7 @@ optdepends=(
   'xdg-desktop-portal: choose where to extract (Extract To…)'
 )
 source=("$_name-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('9123231704ade35cf2c26b7ed4eaf073860d7cda258b9df45882aa174f4baa43')
+sha256sums=('fdbb3f6d2932cdbd155abc53698c242dd2dfd98540af0879e09c61ebcbdcd5e2')
 
 prepare() {
   cd "$_name-$pkgver"
