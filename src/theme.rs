@@ -182,6 +182,11 @@ impl Theme {
 
     /// How much bigger the desktop draws text (GNOME's text-scaling-factor, which Omarchy sets
     /// for high-resolution screens and GTK apps follow).
+    #[cfg(test)]
+    pub fn set_text_scale(&self, scale: f32) {
+        self.text_scale.store(scale.to_bits(), Ordering::Relaxed);
+    }
+
     pub fn text_scale(&self) -> f32 {
         f32::from_bits(self.text_scale.load(Ordering::Relaxed))
     }
@@ -196,6 +201,10 @@ impl Theme {
     /// follows GTK's text scaling, and transparency Omarchy's glassy toggle. A thread does it,
     /// since each is a program to run or a file to look at.
     fn watch_desktop(&self, ctx: egui::Context) {
+        // Tests set these themselves, and shouldn't depend on the machine's desktop.
+        if cfg!(test) {
+            return;
+        }
         let (radius, text_scale, glassy) = (
             self.radius.clone(),
             self.text_scale.clone(),

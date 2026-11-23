@@ -33,3 +33,6 @@ wayland-client = "0.31"
 lto = "thin"
 # Keep function names so crash reports (coredumpctl) show where a crash happened.
 strip = "debuginfo"
+
+[dev-dependencies]
+egui_kittest = "0.37"

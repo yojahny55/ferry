@@ -65,6 +65,16 @@ background so a sleeping NAS never freezes the window, and the app starts instan
 - **Type to jump** to a name, filter as you type, and edit the path directly.
 - Copy and paste interoperate with the terminal: copied files go to the clipboard as paths, and pasted paths become files.
 
+### Glassy windows
+
+With Omarchy's windows set to glassy (Appearance → Windows → Window Opacity), Ferry turns
+see-through like the terminals. Text and icons stay solid, and the desktop shows through the
+background, blurred by Hyprland. The Appearance menu sets the opacity by hand too.
+
+<p align="center">
+<img src="docs/screenshots/glass.png" width="620" alt="Ferry see-through over the Tokyo Night wallpaper, showing a folder of photo previews, two USB drives with capacity bars and a network share">
+</p>
+
 <details>
 <summary>Details view</summary>
 

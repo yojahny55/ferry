@@ -223,6 +223,8 @@ pub struct App {
     ui_scale: Option<f32>,
     /// Background opacity; None follows Omarchy's window opacity setting.
     opacity: Option<f32>,
+    /// The size slider's value while it's being dragged.
+    scale_edit: Option<f32>,
 
     filter: String,
     focus_filter: bool,
@@ -303,6 +305,7 @@ impl App {
             zoom_editor: 1.0,
             ui_scale: None,
             opacity: None,
+            scale_edit: None,
 
             filter: String::new(),
             focus_filter: false,
@@ -375,6 +378,7 @@ impl App {
         self
     }
 
+    // Saved through f64, so 0.65 is written as 0.65 rather than as f32 noise.
     fn settings_json(&self) -> String {
         let sort = match self.sort {
             SortKey::Name => "name",
@@ -384,11 +388,11 @@ impl App {
         let settings = serde_json::json!({
             "grid": self.grid,
             "show_hidden": self.show_hidden,
-            "zoom_list": (self.zoom_list * 100.0).round() / 100.0,
-            "zoom_grid": (self.zoom_grid * 100.0).round() / 100.0,
-            "zoom_editor": (self.zoom_editor * 100.0).round() / 100.0,
-            "ui_scale": self.ui_scale.map(|z| (z * 100.0).round() / 100.0),
-            "opacity": self.opacity.map(|o| (o * 100.0).round() / 100.0),
+            "zoom_list": (self.zoom_list as f64 * 100.0).round() / 100.0,
+            "zoom_grid": (self.zoom_grid as f64 * 100.0).round() / 100.0,
+            "zoom_editor": (self.zoom_editor as f64 * 100.0).round() / 100.0,
+            "ui_scale": self.ui_scale.map(|z| (z as f64 * 100.0).round() / 100.0),
+            "opacity": self.opacity.map(|o| (o as f64 * 100.0).round() / 100.0),
             "sort": sort,
             "ascending": self.ascending,
         });
@@ -481,11 +485,23 @@ impl App {
         self.ui_scale.unwrap_or(self.theme.text_scale())
     }
 
+    /// The button that opens Appearance. Unlike a menu of commands, it holds settings, so it
+    /// stays open while they're changed and closes on a click outside it (or Esc).
+    fn appearance_button(&mut self, ui: &mut Ui) {
+        let config = egui::containers::menu::MenuConfig::new()
+            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
+        let (button, _) =
+            egui::containers::menu::MenuButton::new(RichText::new("\u{f1de}").size(15.0))
+                .config(config)
+                .ui(ui, |ui| self.appearance(ui));
+        button.on_hover_text(tr("Appearance"));
+    }
+
     /// The Appearance menu: size and transparency, following the desktop by default.
     fn appearance(&mut self, ui: &mut Ui) {
         let p = self.p();
         ui.set_min_width(260.0);
-        ui.label(RichText::new(tr("Size")).color(p.dim).size(12.0));
+        let heading = ui.label(RichText::new(tr("Size")).color(p.dim).size(12.0));
         let mut follow = self.ui_scale.is_none();
         if ui
             .checkbox(&mut follow, tr("Follow the desktop's text size"))
@@ -493,17 +509,23 @@ impl App {
         {
             self.ui_scale = (!follow).then(|| self.theme.text_scale());
         }
-        let mut scale = self.scale() * 100.0;
-        let slider = egui::Slider::new(&mut scale, 75.0..=250.0)
+        // Resizing while dragging would move the slider out from under the pointer, so the
+        // dragged value is held here and lands on release.
+        let scale = self.scale_edit.get_or_insert(self.scale() * 100.0);
+        let slider = egui::Slider::new(scale, 75.0..=250.0)
             .suffix("%")
             .step_by(5.0);
-        // Dragging would rescale the slider under the pointer; the change lands on release.
-        let resp = ui.add_enabled(!follow, slider);
-        if resp.drag_stopped() || (resp.changed() && !resp.dragged()) {
-            self.ui_scale = Some(scale / 100.0);
+        let resp = ui.add_enabled(!follow, slider).labelled_by(heading.id);
+        // Shown, the slider snaps the desktop's 163.64% to a 5% step. That isn't a choice, so
+        // only a change while it's enabled (not following) counts.
+        if !follow && (resp.drag_stopped() || (resp.changed() && !resp.dragged())) {
+            self.ui_scale = self.scale_edit.map(|s| s / 100.0);
+        }
+        if !resp.dragged() {
+            self.scale_edit = None;
         }
         ui.add_space(8.0);
-        ui.label(RichText::new(tr("Transparency")).color(p.dim).size(12.0));
+        let heading = ui.label(RichText::new(tr("Transparency")).color(p.dim).size(12.0));
         let mut follow = self.opacity.is_none();
         if ui
             .checkbox(&mut follow, tr("Follow Omarchy's window opacity"))
@@ -519,7 +541,9 @@ impl App {
                     .suffix("%")
                     .step_by(5.0),
             )
+            .labelled_by(heading.id)
             .changed()
+            && !follow
         {
             self.opacity = Some(opacity / 100.0);
         }
@@ -1840,11 +1864,7 @@ impl App {
             ui.add_space(8.0);
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = 2.0;
-                ui.menu_button(RichText::new("\u{f1de}").size(15.0), |ui| {
-                    self.appearance(ui)
-                })
-                .response
-                .on_hover_text(tr("Appearance"));
+                self.appearance_button(ui);
                 if icon_toggle(ui, '\u{f00a}', self.grid, &tr("Icons (Ctrl+2)")).clicked() {
                     self.grid = true;
                 }
@@ -4123,5 +4143,44 @@ mod search_tests {
         assert!(app.search.is_some());
         app.apply(Action::Up);
         assert!(app.search.is_none());
+    }
+}
+
+#[cfg(test)]
+mod appearance_tests {
+    use super::*;
+    use egui::accesskit::Toggled;
+    use egui_kittest::Harness;
+    use egui_kittest::kittest::{NodeT, Queryable};
+
+    #[test]
+    fn appearance_stays_open_while_its_checkboxes_change() {
+        let ctx = egui::Context::default();
+        let dir = std::env::temp_dir();
+        let mut app = App::new(&ctx, dir, None);
+        // A desktop text scale that isn't on the slider's 5% steps, as on Omarchy's 4K setup.
+        app.theme.set_text_scale(1.6364);
+        // Icons come from the desktop's Nerd Font, which a test machine may lack.
+        let mut harness = Harness::builder()
+            .allow_missing_glyphs()
+            .build_ui(move |ui| {
+                app.appearance_button(ui);
+                ui.label(format!("scale set: {}", app.ui_scale.is_some()));
+            });
+        harness.get_by_label("scale set: false");
+        harness.get_by_label("\u{f1de}").click();
+        harness.run();
+        harness.get_by_label("scale set: false");
+        let follow = harness.get_by_label("Follow the desktop\x27s text size");
+        assert_eq!(follow.accesskit_node().toggled(), Some(Toggled::True));
+        follow.click();
+        harness.run();
+        // The menu is still open, the box is unticked, and the size is now set by hand.
+        let follow = harness.get_by_label("Follow the desktop\x27s text size");
+        assert_eq!(follow.accesskit_node().toggled(), Some(Toggled::False));
+        harness.get_by_label("scale set: true");
+        follow.click();
+        harness.run();
+        harness.get_by_label("scale set: false");
     }
 }
