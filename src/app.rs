@@ -2035,6 +2035,13 @@ impl eframe::App for App {
         self.draw(ui);
     }
 
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        // The window, and the Wayland connection the drag code shares, still exist here.
+        if let Some(dnd) = &mut self.dnd {
+            dnd.shutdown();
+        }
+    }
+
     fn raw_input_hook(&mut self, _ctx: &egui::Context, raw_input: &mut egui::RawInput) {
         // The compositor owns the pointer during a desktop drag and keeps the release, so tell
         // egui the button came up, or it would think a drag is still going when we're back.

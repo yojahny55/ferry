@@ -6,6 +6,17 @@ All notable changes to Ferry are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-11-23
+
+### Fixed
+
+- A crash when quitting: the drag-and-drop thread could clean up Wayland objects after the
+  window had already closed their connection.
+
+### Changed
+
+- Release binaries keep function names, so crash reports show where a crash happened.
+
 ## [0.1.0] - 2026-11-23
 
 The first release.
@@ -27,5 +38,6 @@ The first release.
 - Background folder loading, so slow or unreachable network mounts never freeze the window.
 - `FERRY_DEBUG=1` logging for drags, thumbnails and settings.
 
-[Unreleased]: https://github.com/yojahny55/ferry/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/yojahny55/ferry/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/yojahny55/ferry/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/yojahny55/ferry/releases/tag/v0.1.0

@@ -1,6 +1,6 @@
 [package]
 name = "ferry"
-version = "0.1.0"
+version = "0.1.1"
 description = "A keyboard-first file manager that follows the Omarchy theme"
 license = "MIT"
 authors = ["Yojahny Chavez"]
@@ -24,4 +24,5 @@ wayland-client = "0.31"
 
 [profile.release]
 lto = "thin"
-strip = true
+# Keep function names so crash reports (coredumpctl) show where a crash happened.
+strip = "debuginfo"
