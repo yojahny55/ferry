@@ -47,6 +47,11 @@ background so a sleeping NAS never freezes the window, and the app starts instan
   undo. Ctrl+S saves, Esc goes back. Saving is atomic, keeps file permissions, and won't
   overwrite changes another program made in the meantime. Images, videos and documents still
   open in your default apps.
+- **Drives and network shares**, told apart: USB drives and disk images under *Devices*, with
+  a bar showing how full they are, an eject button, and *Mount*, *Unmount* and *Format…* (exFAT,
+  FAT32, ext4, NTFS) in their menu, all through UDisks like GNOME and KDE. NFS, SMB and SSHFS
+  shares from `/etc/fstab` or `/proc/mounts` go under *Network*, and are never touched until
+  opened, so a sleeping NAS never stalls the sidebar.
 - **Drag files out** into other apps (a browser, a chat, another file manager) through native Wayland drag-and-drop.
 - **Safe file operations**: paste never overwrites (`name (1).ext`), Delete moves to the trash,
   and only Shift+Delete deletes, after asking.
@@ -105,8 +110,11 @@ o.bind("SUPER + E", "File manager", { launch = "ferry" })
 
 ### Runtime dependencies
 
-Ferry uses tools Omarchy already ships: `gio` (trash), `xdg-open` (opening files), and
-`coreutils` (`cp`, `mv`). Optional: `xdg-terminal-exec` for *Open Terminal Here*, and the
+Ferry uses tools Omarchy already ships: `gio` (trash), `xdg-open` (opening files),
+`coreutils` (`cp`, `mv`), `lsblk`, and `udisksctl` and `gdbus` (mounting, ejecting and
+formatting drives through UDisks; formatting asks for your password through the desktop's
+polkit agent). Formatting offers the filesystems whose `mkfs` is installed (`exfatprogs`,
+`dosfstools`, `e2fsprogs`, `ntfs-3g`). Optional: `xdg-terminal-exec` for *Open Terminal Here*, and the
 thumbnailers in `/usr/share/thumbnailers` (glycin, ffmpegthumbnailer, papers…) for previews.
 
 ## Keyboard shortcuts
@@ -155,6 +163,7 @@ Press `?` in the app for this list.
 | `~/.config/gtk-3.0/bookmarks` | Bookmarks, shared with GTK apps (read and written; other entries are kept as they are) |
 | `~/.cache/thumbnails/` | Shared preview cache, per the freedesktop spec (read and written) |
 | `~/.config/ferry/settings.json` | View, zoom, sorting, hidden files (written) |
+| `/proc/mounts`, `/etc/fstab` | Mounted drives and network shares (read) |
 
 Ferry never changes Omarchy's or Hyprland's configuration.
 

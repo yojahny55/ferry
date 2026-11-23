@@ -389,32 +389,6 @@ pub fn update_bookmarks(file: &Path, add: &[PathBuf], remove: Option<&Path>) -> 
 }
 
 /// Removable and mounted drives, from the kernel's mount table.
-pub fn devices() -> Vec<(String, PathBuf)> {
-    let mounts = fs::read_to_string("/proc/mounts").unwrap_or_default();
-    let mut seen = std::collections::HashSet::new();
-    mounts
-        .lines()
-        .filter_map(|l| l.split_whitespace().nth(1))
-        .map(|m| m.replace("\\040", " "))
-        .filter(|m| {
-            ["/run/media/", "/media/", "/mnt/"]
-                .iter()
-                .any(|p| m.starts_with(p))
-        })
-        // A path mounted over twice is still one place.
-        .filter(|m| seen.insert(m.clone()))
-        .map(|m| {
-            let path = PathBuf::from(m);
-            (
-                path.file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_default(),
-                path,
-            )
-        })
-        .collect()
-}
-
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Kind {
     Folder,

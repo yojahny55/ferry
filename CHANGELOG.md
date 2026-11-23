@@ -23,6 +23,14 @@ All notable changes to Ferry are documented here. The format follows
 - In the text editor: syntax highlighting colored from the Omarchy theme, a find bar (Ctrl+F,
   Enter / Shift+Enter, F3), and a rendered Markdown preview (Ctrl+E), which Markdown files open in.
 - *New Text File…* (Ctrl+Alt+N).
+- Drives show how full they are, with an eject button, and *Mount*, *Unmount*, *Eject* and
+  *Format…* in their menu, through UDisks. Plugged-in drives that aren't mounted yet show too,
+  and mount when opened. Drives without a label go by their size instead of their UUID.
+
+### Fixed
+
+- NFS and other network shares showed as USB drives. They now have their own *Network* section,
+  read from `/proc/mounts` and `/etc/fstab` without touching the network.
 
 ## [0.1.1] - 2026-11-23
 

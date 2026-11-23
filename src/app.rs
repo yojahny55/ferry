@@ -13,6 +13,7 @@ use eframe::egui::{
     text::LayoutJob, vec2,
 };
 
+use crate::devices::{self, Device};
 use crate::files::{self, Entry, Kind, SortKey};
 use crate::i18n::{self, tr, trn};
 use crate::search;
@@ -40,6 +41,12 @@ enum Dialog {
         paths: Vec<PathBuf>,
     },
     Help,
+    /// Erasing a drive: which filesystem (an index into `devices::formats()`) and its name.
+    Format {
+        device: Device,
+        fs: usize,
+        label: String,
+    },
     /// Closing the editor (or quitting, when `quit`) with unsaved changes.
     Unsaved {
         quit: bool,
@@ -77,6 +84,11 @@ enum Action {
     },
     /// Show a file in its folder, selected.
     Reveal(PathBuf),
+    /// Open a drive, mounting it first if it isn't.
+    OpenDevice(Device),
+    Unmount(Device),
+    Eject(Device),
+    AskFormat(Device),
     Copy,
     Cut,
     Paste,
@@ -129,6 +141,10 @@ enum Loaded {
         forced: bool,
         result: std::io::Result<(crate::editor::Opened, Option<SystemTime>)>,
     },
+    /// A fresh look at the drives and shares.
+    Devices(Vec<Device>),
+    /// A drive finished mounting; open it.
+    Mounted(Result<PathBuf, String>),
     /// The editor's save finished; `text` is what was saved.
     Saved {
         path: PathBuf,
@@ -191,7 +207,8 @@ pub struct App {
     places: Vec<(String, PathBuf, char)>,
     bookmarks: Vec<(String, PathBuf)>,
     bookmarks_file: PathBuf,
-    devices: Vec<(String, PathBuf)>,
+    devices: Vec<Device>,
+    scanning_devices: bool,
 
     show_hidden: bool,
     sort: SortKey,
@@ -268,7 +285,8 @@ impl App {
             places: files::places(),
             bookmarks: files::bookmarks(&files::bookmarks_file()),
             bookmarks_file: files::bookmarks_file(),
-            devices: files::devices(),
+            devices: Vec::new(),
+            scanning_devices: false,
             show_hidden: false,
             sort: SortKey::Name,
             ascending: true,
@@ -1328,7 +1346,6 @@ impl App {
             }
             Action::Refresh => {
                 self.places = files::places();
-                self.devices = files::devices();
                 self.refresh();
             }
             Action::ToggleHidden => {
@@ -1378,6 +1395,53 @@ impl App {
                 } else {
                     // The results stay, so closing the file comes back to them.
                     self.open_file(path);
+                }
+            }
+            Action::OpenDevice(d) => match (&d.mount, &d.block) {
+                (Some(path), _) => self.go(path.clone(), None, true),
+                (None, Some(block)) if !d.fstype.is_empty() => {
+                    self.busy += 1;
+                    self.status = Some((tr("Mounting %1…").replace("%1", &d.name), false));
+                    let (tx, ctx, block) = (self.load_tx.clone(), self.ctx.clone(), block.clone());
+                    std::thread::spawn(move || {
+                        let _ = tx.send(Loaded::Mounted(devices::mount(&block)));
+                        ctx.request_repaint();
+                    });
+                }
+                _ => self.error(
+                    tr("%1 has no filesystem yet. Format it to use it.").replace("%1", &d.name),
+                ),
+            },
+            Action::Unmount(d) => {
+                self.leave(&d);
+                let (name, block) = (d.name.clone(), d.block.clone().unwrap_or_default());
+                self.job(tr("Unmounting %1…").replace("%1", &name), move || {
+                    devices::unmount(&block).map(|_| tr("Unmounted %1").replace("%1", &name))
+                });
+            }
+            Action::Eject(d) => {
+                self.leave(&d);
+                let name = d.name.clone();
+                self.job(tr("Ejecting %1…").replace("%1", &name), move || {
+                    devices::eject(&d).map(|_| tr("You can unplug %1 now").replace("%1", &name))
+                });
+            }
+            Action::AskFormat(d) => {
+                if devices::formats().is_empty() {
+                    self.error(tr(
+                        "No formatting tools are installed (exfatprogs, dosfstools or e2fsprogs).",
+                    ));
+                } else {
+                    let label = if d.name.contains(' ') {
+                        String::new()
+                    } else {
+                        d.name.clone()
+                    };
+                    self.dialog = Some(Dialog::Format {
+                        device: d,
+                        fs: 0,
+                        label,
+                    });
                 }
             }
             Action::Reveal(path) => {
@@ -1881,11 +1945,18 @@ impl App {
             );
         }
 
-        if !self.devices.is_empty() {
-            ui.add_space(12.0);
-            section(ui, &tr("Devices"), &p);
-            for (label, path) in self.devices.clone() {
-                self.place(ui, &label, &path, '\u{f287}', &p, false);
+        let (network, drives): (Vec<Device>, Vec<Device>) = self
+            .devices
+            .clone()
+            .into_iter()
+            .partition(|d| d.kind == devices::Kind::Network);
+        for (title, list) in [(tr("Devices"), drives), (tr("Network"), network)] {
+            if !list.is_empty() {
+                ui.add_space(12.0);
+                section(ui, &title, &p);
+                for device in list {
+                    self.device_row(ui, &device, &p);
+                }
             }
         }
 
@@ -1956,6 +2027,128 @@ impl App {
             });
         }
         resp.on_hover_text(path.display().to_string());
+    }
+
+    /// A drive or share: its name, a bar showing how full it is, an eject button for what can
+    /// be unplugged, and a menu with the rest.
+    fn device_row(&mut self, ui: &mut Ui, d: &Device, p: &Palette) {
+        let bar = d.fill();
+        let height = if bar.is_some() { ROW + 6.0 } else { ROW };
+        let (rect, resp) =
+            ui.allocate_exact_size(vec2(ui.available_width(), height), Sense::click());
+        let current = d.mount.as_ref().is_some_and(|m| self.cwd.starts_with(m));
+        let r = CornerRadius::same(self.theme.radius().min(4));
+        if current {
+            ui.painter().rect_filled(rect, r, p.selection);
+            ui.painter().rect_filled(
+                Rect::from_min_size(rect.min, vec2(3.0, rect.height())),
+                0,
+                p.accent,
+            );
+        } else if resp.hovered() {
+            ui.painter().rect_filled(rect, r, p.surface);
+        }
+        let mounted = d.mount.is_some();
+        let color = if current {
+            p.bright
+        } else if mounted {
+            p.fg
+        } else {
+            p.dim
+        };
+        let middle = rect.top() + ROW / 2.0;
+        ui.painter().text(
+            egui::pos2(rect.left() + 14.0, middle),
+            Align2::LEFT_CENTER,
+            d.icon(),
+            FontId::proportional(15.0),
+            if current { p.accent } else { p.dim },
+        );
+        let can_eject = d.removable && d.block.is_some();
+        let text_w = rect.width() - if can_eject { 72.0 } else { 48.0 };
+        let galley = text_galley(ui, &d.name, 14.0, color, text_w, 1, false);
+        ui.painter().galley(
+            egui::pos2(rect.left() + 40.0, middle - galley.size().y / 2.0),
+            galley,
+            color,
+        );
+        if let Some(fill) = bar {
+            let track = Rect::from_min_size(
+                egui::pos2(rect.left() + 40.0, rect.bottom() - 7.0),
+                vec2(rect.width() - 52.0, 3.0),
+            );
+            ui.painter()
+                .rect_filled(track, 2.0, p.surface.gamma_multiply(1.6));
+            let used = if fill >= 0.9 { p.red } else { p.accent };
+            ui.painter().rect_filled(
+                Rect::from_min_size(track.min, vec2(track.width() * fill, track.height())),
+                2.0,
+                used,
+            );
+        }
+        // The eject button sits over the row, so it gets the click first.
+        let mut ejected = false;
+        if can_eject {
+            let button =
+                Rect::from_center_size(egui::pos2(rect.right() - 16.0, middle), vec2(24.0, 22.0));
+            let eject = ui.interact(button, resp.id.with("eject"), Sense::click());
+            let tint = if eject.hovered() { p.accent } else { p.dim };
+            ui.painter().text(
+                button.center(),
+                Align2::CENTER_CENTER,
+                '\u{f052}',
+                FontId::proportional(13.0),
+                tint,
+            );
+            if eject.on_hover_text(tr("Eject")).clicked() {
+                self.pending.push(Action::Eject(d.clone()));
+                ejected = true;
+            }
+        }
+        if resp.clicked() && !ejected {
+            self.pending.push(Action::OpenDevice(d.clone()));
+        }
+        resp.context_menu(|ui| {
+            if ui.button(tr("Open")).clicked() {
+                self.pending.push(Action::OpenDevice(d.clone()));
+            }
+            if d.kind == devices::Kind::Network {
+                if ui.button(tr("Copy Address")).clicked() {
+                    ui.ctx().copy_text(d.detail.clone());
+                }
+                return;
+            }
+            if mounted && ui.button(tr("Unmount")).clicked() {
+                self.pending.push(Action::Unmount(d.clone()));
+            }
+            if can_eject && ui.button(tr("Eject")).clicked() {
+                self.pending.push(Action::Eject(d.clone()));
+            }
+            if d.removable {
+                ui.separator();
+                if ui
+                    .button(RichText::new(tr("Format…")).color(p.red))
+                    .clicked()
+                {
+                    self.pending.push(Action::AskFormat(d.clone()));
+                }
+            }
+        });
+        resp.on_hover_text(d.summary());
+    }
+
+    /// Leaves a drive's folders before it goes away, so nothing of Ferry's keeps it busy.
+    fn leave(&mut self, d: &Device) {
+        if d.mount.as_ref().is_some_and(|m| self.cwd.starts_with(m)) {
+            self.go(files::home(), None, true);
+        }
+        if self
+            .editor
+            .as_ref()
+            .is_some_and(|e| d.mount.as_ref().is_some_and(|m| e.path.starts_with(m)))
+        {
+            self.request_close_editor();
+        }
     }
 
     fn status_bar(&mut self, ui: &mut Ui) {
@@ -2501,6 +2694,33 @@ impl App {
                         }
                         confirm = enter;
                     }
+                    Dialog::Format { device, fs, label } => {
+                        ui.label(
+                            RichText::new(tr("Format %1?").replace("%1", &device.name))
+                                .size(16.0)
+                                .color(p.bright),
+                        );
+                        ui.add_space(2.0);
+                        ui.label(RichText::new(device.summary()).color(p.dim).size(12.0));
+                        ui.add_space(8.0);
+                        for (i, (_, what)) in devices::formats().iter().enumerate() {
+                            ui.radio_value(fs, i, what.as_str());
+                        }
+                        ui.add_space(6.0);
+                        ui.horizontal(|ui| {
+                            ui.label(tr("Name"));
+                            ui.add(
+                                TextEdit::singleline(label)
+                                    .desired_width(f32::INFINITY)
+                                    .margin(Margin::symmetric(8, 5)),
+                            );
+                        });
+                        ui.add_space(6.0);
+                        ui.label(
+                            RichText::new(tr("Everything on it will be erased. This can't be undone."))
+                                .color(p.red),
+                        );
+                    }
                     Dialog::Delete { paths } => {
                         ui.label(
                             RichText::new(trn("Permanently delete %n items?", paths.len()))
@@ -2570,9 +2790,13 @@ impl App {
                             Dialog::Rename { .. } => tr("Rename"),
                             Dialog::NewFolder { .. } | Dialog::NewFile { .. } => tr("Create"),
                             Dialog::ChangedOnDisk => tr("Overwrite"),
+                            Dialog::Format { .. } => tr("Format"),
                             _ => tr("Delete"),
                         };
-                        let fill = if matches!(dialog, Dialog::Delete { .. } | Dialog::ChangedOnDisk) {
+                        let fill = if matches!(
+                            dialog,
+                            Dialog::Delete { .. } | Dialog::ChangedOnDisk | Dialog::Format { .. }
+                        ) {
                             p.red
                         } else {
                             p.accent
@@ -2689,6 +2913,23 @@ impl App {
                 });
             }
             Some(Dialog::ChangedOnDisk) => self.save_editor(true),
+            Some(Dialog::Format { device, fs, label }) => {
+                let Some((fstype, _)) = devices::formats().get(fs).cloned() else {
+                    return;
+                };
+                self.leave(&device);
+                let (name, block) = (
+                    device.name.clone(),
+                    device.block.clone().unwrap_or_default(),
+                );
+                self.job(tr("Formatting %1…").replace("%1", &name), move || {
+                    if device.mount.is_some() {
+                        devices::unmount(&block)?;
+                    }
+                    devices::format(&block, fstype, &label)
+                        .map(|_| tr("Formatted %1").replace("%1", &name))
+                });
+            }
             Some(Dialog::Help) | Some(Dialog::Unsaved { .. }) | None => {}
         }
     }
@@ -2708,6 +2949,19 @@ impl App {
         while let Ok(loaded) = self.load_rx.try_recv() {
             match loaded {
                 Loaded::Dir(load) => self.loaded(load),
+                Loaded::Devices(list) => {
+                    self.scanning_devices = false;
+                    self.devices = list;
+                }
+                Loaded::Mounted(Ok(path)) => {
+                    self.busy = self.busy.saturating_sub(1);
+                    self.status = None;
+                    self.go(path, None, true);
+                }
+                Loaded::Mounted(Err(message)) => {
+                    self.busy = self.busy.saturating_sub(1);
+                    self.error(message);
+                }
                 Loaded::Text {
                     path,
                     forced,
@@ -2746,7 +3000,15 @@ impl App {
                     ctx.request_repaint();
                 });
             }
-            self.devices = files::devices();
+            // lsblk is quick, but it's a program: off the UI thread like everything else.
+            if !self.scanning_devices {
+                self.scanning_devices = true;
+                let (tx, ctx) = (self.load_tx.clone(), ctx.clone());
+                std::thread::spawn(move || {
+                    let _ = tx.send(Loaded::Devices(devices::scan()));
+                    ctx.request_repaint();
+                });
+            }
             // Other apps edit the same bookmarks file, so it is re-read like the folder.
             self.bookmarks = files::bookmarks(&self.bookmarks_file);
             self.save_settings();
