@@ -103,11 +103,13 @@ enum Action {
     Unmount(Device),
     Eject(Device),
     AskFormat(Device),
-    /// Extract archives beside themselves; `into_folder` always makes a folder for each.
+    /// Extract archives into `dest`, or beside themselves when it's None.
     Extract {
         paths: Vec<PathBuf>,
-        into_folder: bool,
+        dest: Option<PathBuf>,
     },
+    /// Ask the desktop's folder picker where to extract archives.
+    ExtractTo(Vec<PathBuf>),
     AskCompress,
     Copy,
     Cut,
@@ -163,6 +165,13 @@ enum Loaded {
     },
     /// A fresh look at the drives and shares.
     Devices(Vec<Device>),
+    /// The folder picker's answer for Extract To.
+    Picked {
+        paths: Vec<PathBuf>,
+        result: Result<Option<PathBuf>, String>,
+    },
+    /// Extraction finished, with what it made.
+    Extracted(Result<Vec<PathBuf>, String>),
     /// What's inside an archive, for the Extract dialog.
     Listing {
         path: PathBuf,
@@ -1580,24 +1589,33 @@ impl App {
                     devices::eject(&d).map(|_| tr("You can unplug %1 now").replace("%1", &name))
                 });
             }
-            Action::Extract { paths, into_folder } => {
+            Action::Extract { paths, dest } => {
                 let Some(first) = paths.first() else { return };
                 let name = first
                     .file_name()
                     .map(|n| n.to_string_lossy().into_owned())
                     .unwrap_or_default();
-                let n = paths.len();
-                self.job(tr("Extracting %1…").replace("%1", &name), move || {
-                    let mut made = Vec::new();
-                    for path in &paths {
-                        let dir = path.parent().map(PathBuf::from).unwrap_or_default();
-                        made.push(crate::archive::extract(path, &dir, into_folder)?);
-                    }
-                    Ok(match &made[..] {
-                        [one] => tr("Extracted to %1")
-                            .replace("%1", &one.file_name().unwrap_or_default().to_string_lossy()),
-                        _ => trn("Extracted %n archives", n),
-                    })
+                self.busy += 1;
+                self.status = Some((tr("Extracting %1…").replace("%1", &name), false));
+                let (tx, ctx) = (self.load_tx.clone(), self.ctx.clone());
+                std::thread::spawn(move || {
+                    let result = paths
+                        .iter()
+                        .map(|path| {
+                            let beside = path.parent().map(PathBuf::from).unwrap_or_default();
+                            crate::archive::extract(path, dest.as_deref().unwrap_or(&beside), false)
+                        })
+                        .collect();
+                    let _ = tx.send(Loaded::Extracted(result));
+                    ctx.request_repaint();
+                });
+            }
+            Action::ExtractTo(paths) => {
+                let (tx, ctx, start) = (self.load_tx.clone(), self.ctx.clone(), self.cwd.clone());
+                std::thread::spawn(move || {
+                    let result = crate::portal::pick_folder(&tr("Extract To"), &start);
+                    let _ = tx.send(Loaded::Picked { paths, result });
+                    ctx.request_repaint();
                 });
             }
             Action::AskCompress => {
@@ -2768,14 +2786,11 @@ impl App {
             if ui.button(tr("Extract Here")).clicked() {
                 self.pending.push(Action::Extract {
                     paths: targets.clone(),
-                    into_folder: false,
+                    dest: None,
                 });
             }
-            if ui.button(tr("Extract to Folder")).clicked() {
-                self.pending.push(Action::Extract {
-                    paths: targets.clone(),
-                    into_folder: true,
-                });
+            if ui.button(tr("Extract To…")).clicked() {
+                self.pending.push(Action::ExtractTo(targets.clone()));
             }
         }
         if ui.button(tr("Compress…")).clicked() {
@@ -2858,7 +2873,7 @@ impl App {
         // Unsaved-changes answer: Some(Some(then)) saves first, Some(None) discards.
         let mut unsaved: Option<Option<AfterSave>> = None;
         let mut unsaved_quit = false;
-        // Extract answer: Some(into_folder).
+        // Extract answer: Some(false) extracts here, Some(true) asks where.
         let mut extract: Option<bool> = None;
         let frame = egui::Frame::popup(&ctx.global_style())
             .inner_margin(Margin::same(18))
@@ -2935,7 +2950,7 @@ impl App {
                             if ui.add_enabled(ready, here).clicked() || (enter && ready) {
                                 extract = Some(false);
                             }
-                            if ui.add_enabled(ready, egui::Button::new(tr("Extract to Folder"))).clicked() {
+                            if ui.add_enabled(ready, egui::Button::new(tr("Extract To…"))).clicked() {
                                 extract = Some(true);
                             }
                             if ui.button(tr("Cancel")).clicked() {
@@ -3086,12 +3101,16 @@ impl App {
                     });
                 }
             });
-        if let Some(into_folder) = extract
+        if let Some(choose) = extract
             && let Some(Dialog::Extract { path, .. }) = self.dialog.take()
         {
-            self.pending.push(Action::Extract {
-                paths: vec![path],
-                into_folder,
+            self.pending.push(if choose {
+                Action::ExtractTo(vec![path])
+            } else {
+                Action::Extract {
+                    paths: vec![path],
+                    dest: None,
+                }
             });
             return;
         }
@@ -3259,6 +3278,42 @@ impl App {
         while let Ok(loaded) = self.load_rx.try_recv() {
             match loaded {
                 Loaded::Dir(load) => self.loaded(load),
+                Loaded::Picked { paths, result } => match result {
+                    Ok(Some(dest)) => self.apply(Action::Extract {
+                        paths,
+                        dest: Some(dest),
+                    }),
+                    Ok(None) => {}
+                    Err(message) => self.error(message),
+                },
+                Loaded::Extracted(result) => {
+                    self.busy = self.busy.saturating_sub(1);
+                    match result {
+                        Ok(made) => {
+                            self.status = Some((
+                                match &made[..] {
+                                    [one] => tr("Extracted to %1").replace(
+                                        "%1",
+                                        &one.file_name().unwrap_or_default().to_string_lossy(),
+                                    ),
+                                    _ => trn("Extracted %n archives", made.len()),
+                                },
+                                false,
+                            ));
+                            // Show what came out, selected: here, or in the folder it went to.
+                            if let Some(first) = made.first().cloned()
+                                && let Some(dir) = first.parent().map(PathBuf::from)
+                            {
+                                if dir == self.cwd {
+                                    self.reload(Some(first));
+                                } else {
+                                    self.go(dir, Some(first), true);
+                                }
+                            }
+                        }
+                        Err(message) => self.error(message),
+                    }
+                }
                 Loaded::Listing { path, result } => {
                     if let Some(Dialog::Extract {
                         path: shown,
@@ -4461,12 +4516,28 @@ mod archive_tests {
         app.dialog = None;
         app.apply(Action::Extract {
             paths: vec![dir.join("trip.zip")],
-            into_folder: false,
+            dest: None,
         });
         settle(&ctx, &mut app);
         assert_eq!(
             std::fs::read_to_string(dir.join("trip (1)/plan.md")).unwrap(),
             "# plan"
         );
+        assert!(
+            app.selected.contains(&dir.join("trip (1)")),
+            "what came out is selected"
+        );
+
+        // Extracting somewhere else (as Extract To does once a folder is picked) goes there.
+        let elsewhere = dir.join("elsewhere");
+        std::fs::create_dir(&elsewhere).unwrap();
+        app.apply(Action::Extract {
+            paths: vec![dir.join("trip.zip")],
+            dest: Some(elsewhere.clone()),
+        });
+        settle(&ctx, &mut app);
+        assert!(elsewhere.join("trip/plan.md").exists());
+        assert_eq!(app.cwd, elsewhere);
+        assert!(app.selected.contains(&elsewhere.join("trip")));
     }
 }

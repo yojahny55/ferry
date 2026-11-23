@@ -31,6 +31,7 @@ optdepends=(
   'ntfs-3g: format drives as NTFS'
   'ffmpegthumbnailer: video previews'
   'lz4: extract single .lz4 files'
+  'xdg-desktop-portal: choose where to extract (Extract To…)'
 )
 source=("$_name-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
 sha256sums=('9123231704ade35cf2c26b7ed4eaf073860d7cda258b9df45882aa174f4baa43')

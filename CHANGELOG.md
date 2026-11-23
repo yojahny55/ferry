@@ -10,7 +10,7 @@ All notable changes to Ferry are documented here. The format follows
 
 - Compress and extract. Opening an archive shows what's inside, then extracts it: an archive
   holding one folder comes out as that folder, anything else goes into a new folder named after
-  the archive, and nothing is ever overwritten. *Extract Here*, *Extract to Folder* and
+  the archive, and nothing is ever overwritten. *Extract Here*, *Extract To…* (the desktop's folder picker, through xdg-desktop-portal) and
   *Compress…* (zip, tar.zst, tar.gz, tar.xz, 7z) are in the file menu. It all goes through
   bsdtar (libarchive, which every Arch system has), so zip, 7z, rar, tar in every compression,
   iso, cpio and deb open, as do single compressed files (`.gz`, `.xz`, `.zst`, `.bz2`, `.lz4`).

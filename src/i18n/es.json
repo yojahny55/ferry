@@ -224,7 +224,6 @@
   "Extracting %1…": "Extrayendo %1…",
   "Extracted to %1": "Extraído en %1",
   "Extract Here": "Extraer aquí",
-  "Extract to Folder": "Extraer en una carpeta",
   "Compress…": "Comprimir…",
   "Compress": "Comprimir",
   "Reading the archive…": "Leyendo el archivo comprimido…",
@@ -239,5 +238,9 @@
   "%n items inside": {
     "one": "%n elemento dentro",
     "other": "%n elementos dentro"
-  }
+  },
+  "Extract To…": "Extraer en…",
+  "Extract To": "Extraer en",
+  "Couldn't open the folder picker: %1": "No se pudo abrir el selector de carpetas: %1",
+  "The folder picker closed without an answer": "El selector de carpetas se cerró sin respuesta"
 }

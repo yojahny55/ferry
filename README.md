@@ -60,7 +60,7 @@ background so a sleeping NAS never freezes the window, and the app starts instan
 - **Drag files out** into other apps (a browser, a chat, another file manager) through native Wayland drag-and-drop.
 - **Compress and extract** zip, 7z, rar, tar.gz/zst/xz, iso and more, with nothing to install:
   opening an archive shows what's inside first, and extracting never scatters files or
-  overwrites anything. *Compress…* makes zip, tar.zst, tar.gz, tar.xz or 7z.
+  overwrites anything. *Extract To…* picks the destination with the desktop's folder picker, and *Compress…* makes zip, tar.zst, tar.gz, tar.xz or 7z.
 - **Safe file operations**: paste never overwrites (`name (1).ext`), Delete moves to the trash,
   and only Shift+Delete deletes, after asking.
 - **Never blocks on slow disks**: folder loading and change checks run in the background, so an

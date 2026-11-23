@@ -27,6 +27,7 @@ pkgbase = ferry-fm
 	optdepends = ntfs-3g: format drives as NTFS
 	optdepends = ffmpegthumbnailer: video previews
 	optdepends = lz4: extract single .lz4 files
+	optdepends = xdg-desktop-portal: choose where to extract (Extract To…)
 	source = ferry-0.2.1.tar.gz::https://github.com/yojahny55/ferry/archive/refs/tags/v0.2.1.tar.gz
 	sha256sums = 9123231704ade35cf2c26b7ed4eaf073860d7cda258b9df45882aa174f4baa43
 

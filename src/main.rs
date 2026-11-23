@@ -9,6 +9,7 @@ mod files;
 mod highlight;
 mod i18n;
 mod markdown;
+mod portal;
 mod search;
 mod theme;
 mod thumbs;
