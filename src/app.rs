@@ -8,9 +8,9 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::{Duration, SystemTime};
 
 use eframe::egui::{
-    self, Align, Align2, Color32, CornerRadius, Event, FontId, Galley, Key, Layout, Margin,
-    Modifiers, Panel, Rect, RichText, ScrollArea, Sense, Stroke, TextEdit, Ui, Vec2,
-    text::LayoutJob, vec2,
+    self, Align, Align2, Color32, CornerRadius, CursorIcon, Event, FontId, Galley, Key, Label,
+    Layout, Margin, Modifiers, Panel, Rect, RichText, ScrollArea, Sense, Stroke, TextEdit, Ui,
+    Vec2, text::LayoutJob, vec2,
 };
 
 use crate::devices::{self, Device};
@@ -123,6 +123,13 @@ enum Action {
     PasteText(String),
     CopyPath,
     Terminal,
+    /// Open a new tab in the active pane's folder.
+    NewTab,
+    /// Close the active tab (quitting when it is the last one).
+    CloseTab,
+    /// Move to the next or previous tab.
+    NextTab,
+    PrevTab,
     Refresh,
     ToggleHidden,
     SelectAll,
@@ -1796,6 +1803,37 @@ impl App {
 
     fn apply(&mut self, action: Action) {
         match action {
+            Action::NewTab => {
+                let cwd = self.cwd.clone();
+                self.tabs
+                    .insert(self.active_tab + 1, Pane::new(cwd.clone()));
+                self.active_tab += 1;
+                // Re-read the folder so the new tab shows its contents.
+                self.load(cwd, None, false, true);
+            }
+            Action::CloseTab => {
+                if self.tabs.len() == 1 {
+                    return self.quit();
+                }
+                let i = self.active_tab;
+                self.tabs.remove(i);
+                // The neighbour that takes its place is the next tab, or the previous one when
+                // the last was closed.
+                self.active_tab = (i + 1).min(self.tabs.len() - 1);
+                self.load(self.cwd.clone(), None, false, true);
+            }
+            Action::NextTab => {
+                if self.tabs.len() > 1 {
+                    self.active_tab = (self.active_tab + 1) % self.tabs.len();
+                    self.load(self.cwd.clone(), None, false, true);
+                }
+            }
+            Action::PrevTab => {
+                if self.tabs.len() > 1 {
+                    self.active_tab = (self.active_tab + self.tabs.len() - 1) % self.tabs.len();
+                    self.load(self.cwd.clone(), None, false, true);
+                }
+            }
             Action::Go(p) => self.go(p, None, true),
             Action::Back => {
                 if let Some(p) = self.back.pop() {
@@ -2206,6 +2244,10 @@ impl App {
                         }
                         Key::F if m.command && m.shift => self.pending.push(Action::Search),
                         Key::F | Key::I if m.command => self.focus_filter = true,
+                        Key::T if m.ctrl => self.pending.push(Action::NewTab),
+                        Key::W if m.ctrl => self.pending.push(Action::CloseTab),
+                        Key::Tab if m.ctrl && !m.shift => self.pending.push(Action::NextTab),
+                        Key::Tab if m.ctrl && m.shift => self.pending.push(Action::PrevTab),
                         _ => {}
                     }
                     if !typing {
@@ -2271,6 +2313,8 @@ impl App {
             }
             Key::F2 => Some(Action::AskRename),
             Key::F4 => Some(Action::Terminal),
+            // Alt+X opens a terminal too, for people who reach it from the tab strip.
+            Key::X if m.alt => Some(Action::Terminal),
             Key::F5 => Some(Action::Refresh),
             Key::Delete if m.shift => Some(Action::AskDelete),
             Key::Delete => Some(Action::Trash),
@@ -2470,6 +2514,58 @@ impl App {
                 self.path_bar(ui, &p);
             });
         });
+    }
+
+    /// The row of open tabs, shown only once there is more than one. Clicking a tab switches to
+    /// it; its × closes the active tab.
+    fn tab_strip(&mut self, ui: &mut Ui) {
+        let p = self.p();
+        // Decide what was clicked first: drawing borrows `self.tabs`, so acting has to wait.
+        let mut switch_to: Option<usize> = None;
+        let mut close_clicked = false;
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            for (i, pane) in self.tabs.iter().enumerate() {
+                let active = i == self.active_tab;
+                let name = pane
+                    .cwd
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| pane.cwd.to_string_lossy().into_owned());
+                ui.horizontal(|ui| {
+                    ui.set_min_height(26.0);
+                    let color = if active { p.on_accent } else { p.dim };
+                    // A finite width: an infinite one makes the row's size NaN in a headless frame.
+                    let galley =
+                        ui.painter()
+                            .layout_no_wrap(name.clone(), FontId::default(), color);
+                    let width = galley.size().x.max(24.0);
+                    if ui
+                        .add_sized([width, 24.0], Label::new(RichText::new(&name).color(color)))
+                        .on_hover_cursor(CursorIcon::PointingHand)
+                        .clicked()
+                    {
+                        switch_to = Some(i);
+                    }
+                    if ui
+                        .add_sized(
+                            [16.0, 24.0],
+                            Label::new(RichText::new("\u{2715}").color(color)),
+                        )
+                        .on_hover_cursor(CursorIcon::PointingHand)
+                        .clicked()
+                    {
+                        close_clicked = true;
+                    }
+                });
+            }
+        });
+        if close_clicked {
+            self.pending.push(Action::CloseTab);
+        } else if let Some(i) = switch_to.filter(|&i| i != self.active_tab) {
+            self.active_tab = i;
+            self.load(self.cwd.clone(), None, false, true);
+        }
     }
 
     fn path_bar(&mut self, ui: &mut Ui, p: &Palette) {
@@ -3999,6 +4095,16 @@ impl App {
             )
             .show_separator_line(false)
             .show(ui, |ui| self.toolbar(ui));
+        if self.tabs.len() > 1 {
+            Panel::top("tabs")
+                .frame(
+                    egui::Frame::new()
+                        .fill(self.glass(p.bg))
+                        .inner_margin(Margin::symmetric(8, 4)),
+                )
+                .show_separator_line(false)
+                .show(ui, |ui| self.tab_strip(ui));
+        }
         Panel::bottom("status")
             .frame(
                 egui::Frame::new()
@@ -4677,7 +4783,11 @@ fn help(ui: &mut Ui, p: &Palette) {
                 ("Ctrl+H", "Hidden files"),
                 ("Ctrl+1 / Ctrl+2", "Details or icons"),
                 ("Ctrl+Wheel / Ctrl+± / Ctrl+0", "Zoom"),
-                ("F4", "Open Terminal Here"),
+                ("Ctrl+T", &tr("New Tab")),
+                ("Ctrl+W", &tr("Close Tab")),
+                ("Ctrl+Tab", &tr("Next Tab")),
+                ("Ctrl+Shift+Tab", &tr("Previous Tab")),
+                ("F4 / Alt+X", "Open Terminal Here"),
                 ("F5", "Refresh"),
                 ("Alt+Enter", "Properties"),
                 ("Ctrl+S", "Save (in the text editor)"),
@@ -5177,5 +5287,60 @@ mod pane_tests {
         assert_eq!(app.cwd, dir);
         assert_eq!(app.tabs.len(), 1);
         assert_eq!(app.active_tab, 0);
+    }
+}
+
+#[cfg(test)]
+mod tabs_tests {
+    use super::*;
+
+    fn settle(ctx: &egui::Context, app: &mut App) {
+        for _ in 0..30 {
+            std::thread::sleep(Duration::from_millis(10));
+            let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
+                app.poll(ui.ctx());
+                app.draw(ui);
+            });
+            out.textures_delta.clear();
+        }
+    }
+
+    #[test]
+    fn tabs_open_switch_and_close() {
+        let dir = std::env::temp_dir().join(format!("ferry-tabs-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        for name in ["a", "b"] {
+            std::fs::create_dir_all(dir.join(name)).unwrap();
+        }
+        let ctx = egui::Context::default();
+        let mut app = App::new(&ctx, dir.clone(), None);
+        settle(&ctx, &mut app);
+
+        // A new tab opens in the same folder and takes over.
+        app.apply(Action::NewTab);
+        assert_eq!(app.tabs.len(), 2);
+        assert_eq!(app.active_tab, 1);
+        assert_eq!(app.cwd, dir);
+
+        // The first tab kept its own state.
+        app.apply(Action::PrevTab);
+        assert_eq!(app.active_tab, 0);
+        app.apply(Action::Go(dir.join("a")));
+        settle(&ctx, &mut app);
+        assert_eq!(app.cwd, dir.join("a"));
+
+        // Back to the second tab: it is still where it was.
+        app.apply(Action::NextTab);
+        assert_eq!(app.active_tab, 1);
+        assert_eq!(app.cwd, dir);
+
+        // Closing a tab switches to its neighbour; closing the last one quits.
+        app.apply(Action::CloseTab);
+        assert_eq!(app.tabs.len(), 1);
+        assert!(!app.allow_close);
+        app.apply(Action::Go(dir.join("b")));
+        settle(&ctx, &mut app);
+        app.apply(Action::CloseTab);
+        assert!(app.allow_close);
     }
 }

@@ -6,6 +6,13 @@ All notable changes to Ferry are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- Tabs: Ctrl+T opens one in the current folder, Ctrl+W closes it (quitting when it is the last),
+  Ctrl+Tab and Ctrl+Shift+Tab move between them. A tab strip appears once there are two or more;
+  each tab shows its folder, clicking switches to it, and its × closes it. Alt+X opens a terminal
+  in the active pane's folder, like F4.
+
 ## [0.3.1] - 2026-11-23
 
 ### Fixed
