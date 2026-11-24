@@ -8,11 +8,15 @@ All notable changes to Ferry are documented here. The format follows
 
 ### Fixed
 
-- Clicking a split pane's empty space now makes it the active one (F6 already did; the mouse
-  didn't). Each half also keeps its own grid column width instead of sharing one.
+- The active tab no longer has a line drawn across its name, and the tab's × sits centered on
+  the right with room before it (it highlights on hover).
+- Clicking anywhere in a split pane (a file, empty space, a right-click) now makes it the active
+  one, so the toolbar and view switches act on it (F6 already did; the mouse didn't). Each half also keeps its own grid column width instead of sharing one.
 
 ### Added
 
+- "Show in folder" from a browser or another app opens Ferry with the file selected: Ferry now
+  answers the desktop's standard org.freedesktop.FileManager1 request over D-Bus.
 - Tabs: Ctrl+T opens one in the current folder, Ctrl+W closes it (quitting when it is the last),
   Ctrl+Tab and Ctrl+Shift+Tab move between them. A tab strip appears once there are two or more;
   each tab shows its folder, clicking switches to it, and its × closes it. Alt+X opens a terminal

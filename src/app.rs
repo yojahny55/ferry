@@ -395,8 +395,6 @@ pub struct App {
     split: Option<Pane>,
     /// Which pane gets keys and clicks: false is the left (tab) pane, true the right one.
     active_pane: bool,
-    /// Set by `folder` when its background is clicked in split mode; consumed by `split_view`.
-    clicked_pane: Option<bool>,
     places: Vec<(String, PathBuf, char)>,
     bookmarks: Vec<(String, PathBuf)>,
     bookmarks_file: PathBuf,
@@ -497,7 +495,6 @@ impl App {
             active_tab: 0,
             split: None,
             active_pane: false,
-            clicked_pane: None,
             places: files::places(),
             bookmarks: files::bookmarks(&files::bookmarks_file()),
             bookmarks_file: files::bookmarks_file(),
@@ -3116,31 +3113,40 @@ impl App {
                         p.surface.b().max(40),
                     )
                 };
-                let (rect, resp) = ui.allocate_exact_size(vec2(width + 26.0, 30.0), Sense::click());
-                ui.painter().rect_filled(rect.shrink(1.0), 6.0, fill);
-                if active {
-                    // A bright top edge sells the "this one is up" feel.
-                    let line =
-                        Rect::from_min_max(rect.min + vec2(8.0, 0.5), rect.max - vec2(8.0, 1.5));
-                    ui.painter()
-                        .line_segment([line.min, line.max], Stroke::new(1.5, p.on_accent));
-                }
+                // Name, a gap, then the × in its own square, centered on the row.
+                let (rect, resp) = ui.allocate_exact_size(vec2(width + 40.0, 30.0), Sense::click());
+                let radius = self.theme.radius().min(6);
+                ui.painter().rect_filled(rect.shrink(1.0), radius, fill);
                 let text_color = if active { p.on_accent } else { p.fg };
-                ui.painter().with_clip_rect(rect).text(
-                    rect.left_center() + vec2(8.0, 0.0),
-                    Align2::LEFT_CENTER,
-                    &name,
-                    FontId::default(),
-                    text_color,
+                let close = Rect::from_center_size(
+                    egui::pos2(rect.right() - 15.0, rect.center().y),
+                    vec2(18.0, 18.0),
                 );
-                let close =
-                    Rect::from_min_max(rect.max - vec2(24.0, 15.0), rect.max - vec2(8.0, 1.0));
+                ui.painter()
+                    .with_clip_rect(rect.with_max_x(close.left() - 2.0))
+                    .text(
+                        rect.left_center() + vec2(10.0, 0.0),
+                        Align2::LEFT_CENTER,
+                        &name,
+                        FontId::default(),
+                        text_color,
+                    );
+                // The × gets a soft backdrop on hover, so it reads as its own button.
+                let over_close = resp.hover_pos().is_some_and(|pos| close.contains(pos));
+                if over_close {
+                    ui.painter()
+                        .rect_filled(close, radius.min(4), text_color.gamma_multiply(0.2));
+                }
                 ui.painter().text(
                     close.center(),
                     Align2::CENTER_CENTER,
                     "\u{2715}",
                     FontId::proportional(11.0),
-                    if active { p.on_accent } else { p.dim },
+                    if active || over_close {
+                        text_color
+                    } else {
+                        p.dim
+                    },
                 );
                 if resp.clicked() {
                     let pos = ui.input(|i| i.pointer.interact_pos()).unwrap_or_default();
@@ -3582,11 +3588,6 @@ impl App {
         );
         if background.clicked() {
             self.selected.clear();
-            // In split mode, record which pane was clicked so `split_view` can activate it.
-            // `active_pane` is forced to the half being rendered, so we can't check it here.
-            if self.split.is_some() {
-                self.clicked_pane = Some(self.active_pane);
-            }
         }
         background.context_menu(|ui| self.folder_menu(ui));
 
@@ -3625,11 +3626,23 @@ impl App {
             egui::pos2(left.max.x - half + gap / 2.0, left.min.y),
             vec2(half - gap / 2.0, left.height()),
         );
+        // Any press in a half makes it active, whichever widget inside takes the click (a file,
+        // the background, a scroll bar). Read from raw input before drawing, so the toolbar and
+        // this frame's click already act on it. Presses on menus or dialogs above don't count.
+        if let Some(pos) =
+            ui.input(|i| i.pointer.press_origin().filter(|_| i.pointer.any_pressed()))
+            && ui.ctx().layer_id_at(pos) == Some(ui.layer_id())
+        {
+            if left_rect.contains(pos) {
+                self.active_pane = false;
+            } else if right_rect.contains(pos) {
+                self.active_pane = true;
+            }
+        }
         for (rect, is_split) in [(left_rect, false), (right_rect, true)] {
             let active = self.active_pane == is_split;
             // The half gets its own background so a glassy window never shows the wallpaper
-            // through it: text and icons stay solid over their pane's surface. Clicking a half
-            // makes it active — `folder`'s background is what actually receives the click.
+            // through it: text and icons stay solid over their pane's surface.
             ui.painter()
                 .rect_filled(rect.shrink(1.0), r, self.glass(p.bg));
             ui.painter().rect_stroke(
@@ -3662,11 +3675,6 @@ impl App {
             });
             self.folder(&mut inner);
             self.active_pane = was;
-        }
-        // `folder` records which half's background was clicked (its own forced pane). Apply it
-        // after both halves are drawn, so the next frame highlights the newly active one.
-        if let Some(pane) = self.clicked_pane.take() {
-            self.active_pane = pane;
         }
     }
 
