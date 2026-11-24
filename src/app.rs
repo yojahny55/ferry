@@ -821,21 +821,37 @@ impl App {
         target.loading = None;
         let entries = match load.result {
             Ok(entries) => entries,
-            // Asked to open a file: show its folder with the file selected.
+            // Asked to open a file: show its folder with the file selected. The fallback goes
+            // through Deref, so stash the routing pane first: a background pane's failed load
+            // must recover its own pane, not whichever is active now.
             Err(e) if e.kind() == std::io::ErrorKind::NotADirectory && load.fresh => {
-                return match load.path.parent() {
+                let (was_tab, was_pane) = match load.pane {
+                    PaneId::Tab(i) => (std::mem::replace(&mut self.active_tab, i), false),
+                    PaneId::Split => (0, std::mem::replace(&mut self.active_pane, true)),
+                };
+                match load.path.parent() {
                     Some(parent) => {
-                        self.go(parent.to_path_buf(), Some(load.path.clone()), load.history)
+                        self.go(parent.to_path_buf(), Some(load.path.clone()), load.history);
                     }
                     None => self.error(format!("{}: {e}", load.path.display())),
-                };
+                }
+                self.active_tab = was_tab;
+                self.active_pane = was_pane;
+                return;
             }
             // The folder went away (unmounted, deleted elsewhere): fall back to its parent.
             Err(e) if e.kind() == std::io::ErrorKind::NotFound && !load.history => {
-                return match load.path.parent() {
+                let (was_tab, was_pane) = match load.pane {
+                    PaneId::Tab(i) => (std::mem::replace(&mut self.active_tab, i), false),
+                    PaneId::Split => (0, std::mem::replace(&mut self.active_pane, true)),
+                };
+                match load.path.parent() {
                     Some(parent) => self.go(parent.to_path_buf(), None, false),
                     None => self.error(format!("{}: {e}", load.path.display())),
-                };
+                }
+                self.active_tab = was_tab;
+                self.active_pane = was_pane;
+                return;
             }
             Err(e) => return self.error(format!("{}: {e}", load.path.display())),
         };
