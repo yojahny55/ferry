@@ -8,9 +8,9 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::{Duration, SystemTime};
 
 use eframe::egui::{
-    self, Align, Align2, Color32, CornerRadius, CursorIcon, Event, FontId, Galley, Key, Label,
-    Layout, Margin, Modifiers, Panel, Rect, RichText, ScrollArea, Sense, Stroke, TextEdit, Ui,
-    Vec2, text::LayoutJob, vec2,
+    self, Align, Align2, Color32, CornerRadius, Event, FontId, Galley, Key, Layout, Margin,
+    Modifiers, Panel, Rect, RichText, ScrollArea, Sense, Stroke, TextEdit, Ui, Vec2,
+    text::LayoutJob, vec2,
 };
 
 use crate::devices::{self, Device};
@@ -2970,9 +2970,9 @@ impl App {
     fn viewport_width(&self) -> f32 {
         // In the split view each half keeps its own width; see `folder`.
         let key = if self.active_pane && self.split.is_some() {
-            "ferry-width-split"
+            "ferry-width-right"
         } else {
-            "ferry-width"
+            "ferry-width-left"
         };
         self.ctx
             .memory(|m| m.data.get_temp::<f32>(egui::Id::unique(key)))
@@ -3089,7 +3089,7 @@ impl App {
         let mut switch_to: Option<usize> = None;
         let mut close_at: Option<usize> = None;
         ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 4.0;
+            ui.spacing_mut().item_spacing.x = 6.0;
             for (i, pane) in self.tabs.iter().enumerate() {
                 let active = i == self.active_tab;
                 let name = pane
@@ -3097,32 +3097,57 @@ impl App {
                     .file_name()
                     .map(|n| n.to_string_lossy().into_owned())
                     .unwrap_or_else(|| pane.cwd.to_string_lossy().into_owned());
-                ui.horizontal(|ui| {
-                    ui.set_min_height(26.0);
-                    let color = if active { p.on_accent } else { p.dim };
-                    // A finite width: an infinite one makes the row's size NaN in a headless frame.
-                    let galley =
-                        ui.painter()
-                            .layout_no_wrap(name.clone(), FontId::default(), color);
-                    let width = galley.size().x.max(24.0);
-                    if ui
-                        .add_sized([width, 24.0], Label::new(RichText::new(&name).color(color)))
-                        .on_hover_cursor(CursorIcon::PointingHand)
-                        .clicked()
-                    {
+                // A finite width: an infinite one makes the row's size NaN in a headless frame.
+                let galley = ui
+                    .painter()
+                    .layout_no_wrap(name.clone(), FontId::default(), p.fg);
+                let width = galley.size().x.max(24.0);
+                // The tab is a raised card: the active one sits on the accent, the others on a
+                // lighter surface that lifts off the strip's background.
+                let fill = if active {
+                    p.accent
+                } else {
+                    Color32::from_rgb(
+                        p.surface.r().max(40),
+                        p.surface.g().max(40),
+                        p.surface.b().max(40),
+                    )
+                };
+                let (rect, resp) = ui.allocate_exact_size(vec2(width + 26.0, 30.0), Sense::click());
+                ui.painter()
+                    .rect_filled(rect.shrink(1.0), 6.0, fill);
+                if active {
+                    // A bright top edge sells the "this one is up" feel.
+                    let line =
+                        Rect::from_min_max(rect.min + vec2(8.0, 0.5), rect.max - vec2(8.0, 1.5));
+                    ui.painter()
+                        .line_segment([line.min, line.max], Stroke::new(1.5, p.on_accent));
+                }
+                let text_color = if active { p.on_accent } else { p.fg };
+                ui.painter().with_clip_rect(rect).text(
+                    rect.left_center() + vec2(8.0, 0.0),
+                    Align2::LEFT_CENTER,
+                    &name,
+                    FontId::default(),
+                    text_color,
+                );
+                let close =
+                    Rect::from_min_max(rect.max - vec2(24.0, 15.0), rect.max - vec2(8.0, 1.0));
+                ui.painter().text(
+                    close.center(),
+                    Align2::CENTER_CENTER,
+                    "\u{2715}",
+                    FontId::proportional(11.0),
+                    if active { p.on_accent } else { p.dim },
+                );
+                if resp.clicked() {
+                    let pos = ui.input(|i| i.pointer.interact_pos()).unwrap_or_default();
+                    if close.contains(pos) {
+                        close_at = Some(i);
+                    } else {
                         switch_to = Some(i);
                     }
-                    if ui
-                        .add_sized(
-                            [16.0, 24.0],
-                            Label::new(RichText::new("\u{2715}").color(color)),
-                        )
-                        .on_hover_cursor(CursorIcon::PointingHand)
-                        .clicked()
-                    {
-                        close_at = Some(i);
-                    }
-                });
+                }
             }
         });
         if let Some(i) = close_at {
@@ -3523,11 +3548,11 @@ impl App {
     fn folder(&mut self, ui: &mut Ui) {
         let p = self.p();
         // The width is shared state (grid columns fit it); in the split view each half keeps its
-        // own, keyed by which pane it draws.
+        // own, keyed by which half this call draws — the right one only while it is active.
         let key = if self.active_pane && self.split.is_some() {
-            "ferry-width-split"
+            "ferry-width-right"
         } else {
-            "ferry-width"
+            "ferry-width-left"
         };
         ui.ctx()
             .data_mut(|d| d.insert_temp(egui::Id::unique(key), ui.available_width()));
@@ -3578,14 +3603,24 @@ impl App {
             egui::pos2(left.max.x - half + gap / 2.0, left.min.y),
             vec2(half - gap / 2.0, left.height()),
         );
+        // A click in a half makes it the active pane: F6 is not the only way to switch.
+        let mut activate = false;
         for (rect, is_split) in [(left_rect, false), (right_rect, true)] {
             let active = self.active_pane == is_split;
+            // The half gets its own background so a glassy window never shows the wallpaper
+            // through it: text and icons stay solid over their pane's surface.
+            ui.painter()
+                .rect_filled(rect.shrink(1.0), r, self.glass(p.bg));
             ui.painter().rect_stroke(
                 rect.shrink(1.0),
                 r,
                 Stroke::new(1.0, if active { p.accent } else { p.muted }),
                 egui::StrokeKind::Inside,
             );
+            let hit = ui.interact(rect, ui.scope_id().with("split-hit"), Sense::click());
+            if hit.clicked() && !active {
+                activate = true;
+            }
             // `folder` reads through DerefMut, so force the half's own pane for its duration.
             let was = std::mem::replace(&mut self.active_pane, is_split);
             ui.allocate_space(rect.size());
@@ -3601,6 +3636,9 @@ impl App {
                 |ui| self.folder(ui),
             );
             self.active_pane = was;
+        }
+        if activate {
+            self.active_pane = !self.active_pane;
         }
     }
 
