@@ -60,6 +60,7 @@ package() {
   cd "$_name-$pkgver"
   install -Dm755 target/release/ferry "$pkgdir/usr/bin/ferry"
   install -Dm644 pkgbuild/ferry.desktop "$pkgdir/usr/share/applications/ferry.desktop"
+  install -Dm644 pkgbuild/ferry-file-manager1.service "$pkgdir/usr/share/dbus-1/services/ferry-file-manager1.service"
   install -Dm644 pkgbuild/ferry.svg "$pkgdir/usr/share/icons/hicolor/scalable/apps/ferry.svg"
   install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
   install -Dm644 README.md CHANGELOG.md -t "$pkgdir/usr/share/doc/$pkgname"

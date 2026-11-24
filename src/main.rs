@@ -22,6 +22,18 @@ use std::sync::Arc;
 use eframe::egui::{self, FontData, FontDefinitions, FontFamily};
 
 fn main() -> eframe::Result {
+    // D-Bus starts this (see pkgbuild/ferry-file-manager1.service) to answer "show in folder"
+    // requests; it opens no window of its own.
+    if std::env::args_os()
+        .nth(1)
+        .is_some_and(|a| a == "--file-manager1")
+    {
+        if let Err(e) = portal::serve_file_manager() {
+            eprintln!("ferry: {e}");
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
     // `ferry [path]`: a folder opens there, a file opens its folder with it selected (the app
     // works out which on its loader thread). Nothing here touches the disk: the path may be on
     // a network mount that isn't answering, and the window has to open regardless.

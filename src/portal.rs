@@ -1,9 +1,11 @@
 // Asking the desktop for a folder through xdg-desktop-portal, so the picker is the one every
-// other app on the desktop uses (on Omarchy, the GTK portal's), not one of Ferry's own.
+// other app on the desktop uses (on Omarchy, the GTK portal's), not one of Ferry's own. Also the
+// other direction: Ferry answering the desktop's "show this file in the file manager" calls.
 
 use std::collections::HashMap;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use zbus::MatchRule;
@@ -103,6 +105,61 @@ fn file_path(uri: &str) -> Option<PathBuf> {
     ))
 }
 
+/// Serves `org.freedesktop.FileManager1` on the session bus: it's how a browser's "Show in
+/// folder" (and other apps) asks the desktop's file manager to open a folder with a file
+/// selected. D-Bus starts this on demand as `ferry --file-manager1`; each request opens a
+/// window. Runs until the bus connection ends.
+pub fn serve_file_manager() -> Result<(), String> {
+    let conn = Connection::session().map_err(|e| e.to_string())?;
+    conn.request_name("org.freedesktop.FileManager1")
+        .map_err(|e| e.to_string())?;
+    // argv[0] (D-Bus runs /usr/bin/ferry) rather than current_exe: after an upgrade new windows
+    // run the new binary, not the deleted one this long-lived process still has mapped.
+    let exe = std::env::args_os().next().unwrap_or_else(|| "ferry".into());
+    for msg in MessageIterator::from(&conn) {
+        let Ok(msg) = msg else { continue };
+        let header = msg.header();
+        if header.message_type() != Type::MethodCall
+            || header.interface().map(|i| i.as_str()) != Some("org.freedesktop.FileManager1")
+        {
+            continue;
+        }
+        let member = header.member().map(|m| m.to_string()).unwrap_or_default();
+        let uris = msg
+            .body()
+            .deserialize::<(Vec<String>, String)>()
+            .map(|(uris, _startup_id)| uris)
+            .unwrap_or_default();
+        let Some(path) = show_target(&member, &uris) else {
+            let _ = conn.reply_error(
+                &header,
+                "org.freedesktop.DBus.Error.InvalidArgs",
+                &format!("Nothing to show for {member}"),
+            );
+            continue;
+        };
+        // Reaped on a thread so closed windows don't linger as zombies under the service.
+        if let Ok(mut child) = Command::new(&exe).arg(path).spawn() {
+            std::thread::spawn(move || child.wait());
+        }
+        let _ = conn.reply(&header, &());
+    }
+    Ok(())
+}
+
+/// What a FileManager1 call should open: a folder (ShowFolders) or a file, which Ferry opens in
+/// its folder with the file selected (ShowItems, ShowItemProperties). Plain paths are taken too:
+/// not every caller sends a URI. None for an unknown method or nothing to show.
+/// shortcut: only the first item is shown, since Ferry selects one file at start; open a window
+/// per folder if a caller ever sends several.
+fn show_target(member: &str, uris: &[String]) -> Option<PathBuf> {
+    if !["ShowFolders", "ShowItems", "ShowItemProperties"].contains(&member) {
+        return None;
+    }
+    let uri = uris.first()?;
+    file_path(uri).or_else(|| uri.starts_with('/').then(|| PathBuf::from(uri)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -119,6 +176,28 @@ mod tests {
         );
         assert_eq!(file_path("https://example.com/x"), None);
         assert_eq!(file_path("file:///odd%2"), Some(PathBuf::from("/odd%2")));
+    }
+
+    #[test]
+    fn file_manager_calls_open_the_first_item() {
+        let uris = |u: &[&str]| u.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            show_target(
+                "ShowItems",
+                &uris(&["file:///home/me/Downloads/a%20b.pdf", "file:///x"])
+            ),
+            Some(PathBuf::from("/home/me/Downloads/a b.pdf"))
+        );
+        assert_eq!(
+            show_target("ShowFolders", &uris(&["/home/me/Downloads"])),
+            Some(PathBuf::from("/home/me/Downloads"))
+        );
+        assert_eq!(show_target("ShowItems", &[]), None);
+        assert_eq!(
+            show_target("ShowItems", &uris(&["https://example.com/a"])),
+            None
+        );
+        assert_eq!(show_target("Quit", &uris(&["/tmp"])), None);
     }
 
     /// Opens the real picker: `FERRY_PORTAL=<dir> cargo test real_picker -- --ignored`, then

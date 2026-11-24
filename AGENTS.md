@@ -36,7 +36,7 @@ Rust 1.95+, edition 2024: let-chains (`if let … && …`) are fine and used thr
 | `src/files.rs` | Everything that touches the disk: listing (`Entry`), sorting, paste, trash, bookmarks, `unique_name` |
 | `src/archive.rs` | Compress/extract/list through `bsdtar` (and gzip/xz/zstd… for single files) |
 | `src/props.rs` | Properties: file facts, folder usage, permissions, checksums |
-| `src/portal.rs` | Folder picker via xdg-desktop-portal over D-Bus (zbus 5, blocking) |
+| `src/portal.rs` | D-Bus (zbus 5, blocking): folder picker via xdg-desktop-portal; the `FileManager1` service (`ferry --file-manager1`, started by `pkgbuild/ferry-file-manager1.service`) |
 | `src/devices.rs` | Drives and network shares: lsblk, /proc/mounts, fstab; mount/eject/format via udisksctl/gdbus |
 | `src/search.rs` | Name and content search (`ignore`, `nucleo-matcher`, `grep-*` crates) |
 | `src/editor.rs` | Built-in text editor: file side (load, save, find) |
