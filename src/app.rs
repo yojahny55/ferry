@@ -209,6 +209,63 @@ enum Loaded {
     },
 }
 
+/// One view of a folder: its own place, history, selection and scroll position. A tab is a
+/// Pane; the split's second pane is another one that dies with the split. `pub` because App
+/// derefs to it, which puts it in a public interface even though nothing names it outside.
+pub struct Pane {
+    cwd: PathBuf,
+    back: Vec<PathBuf>,
+    forward: Vec<PathBuf>,
+    entries: Vec<Entry>,
+    view: Vec<usize>,
+    dir_mtime: Option<SystemTime>,
+    free: Option<u64>,
+    show_hidden: bool,
+    sort: SortKey,
+    ascending: bool,
+    grid: bool,
+    zoom_list: f32,
+    zoom_grid: f32,
+    filter: String,
+    focus_filter: bool,
+    path_edit: Option<String>,
+    selected: HashSet<PathBuf>,
+    cursor: Option<usize>,
+    anchor: Option<usize>,
+    scroll_to_cursor: bool,
+    viewport: (f32, f32),
+    jump: (String, f64),
+}
+
+impl Pane {
+    fn new(start: PathBuf) -> Self {
+        Pane {
+            cwd: start,
+            back: Vec::new(),
+            forward: Vec::new(),
+            entries: Vec::new(),
+            view: Vec::new(),
+            dir_mtime: None,
+            free: None,
+            show_hidden: false,
+            sort: SortKey::Name,
+            ascending: true,
+            grid: false,
+            zoom_list: 1.0,
+            zoom_grid: 1.0,
+            filter: String::new(),
+            focus_filter: false,
+            path_edit: None,
+            selected: HashSet::new(),
+            cursor: None,
+            anchor: None,
+            scroll_to_cursor: false,
+            viewport: (0.0, 0.0),
+            jump: (String::new(), 0.0),
+        }
+    }
+}
+
 /// The Properties dialog's state. Its background work stops when it closes (see `Stop`).
 struct Props {
     paths: Vec<PathBuf>,
@@ -279,25 +336,14 @@ pub struct App {
     language: String,
     last_poll: f64,
 
-    cwd: PathBuf,
-    back: Vec<PathBuf>,
-    forward: Vec<PathBuf>,
-    entries: Vec<Entry>,
-    view: Vec<usize>,
-    dir_mtime: Option<SystemTime>,
-    free: Option<u64>,
+    tabs: Vec<Pane>,
+    active_tab: usize,
     places: Vec<(String, PathBuf, char)>,
     bookmarks: Vec<(String, PathBuf)>,
     bookmarks_file: PathBuf,
     devices: Vec<Device>,
     scanning_devices: bool,
 
-    show_hidden: bool,
-    sort: SortKey,
-    ascending: bool,
-    grid: bool,
-    zoom_list: f32,
-    zoom_grid: f32,
     zoom_editor: f32,
     /// Overall size; None follows the desktop's text scaling.
     ui_scale: Option<f32>,
@@ -307,17 +353,6 @@ pub struct App {
     scale_edit: Option<f32>,
     /// The format last used to compress, offered first next time.
     compress_format: usize,
-
-    filter: String,
-    focus_filter: bool,
-    path_edit: Option<String>,
-
-    selected: HashSet<PathBuf>,
-    cursor: Option<usize>,
-    anchor: Option<usize>,
-    scroll_to_cursor: bool,
-    viewport: (f32, f32),
-    jump: (String, f64),
 
     dialog: Option<Dialog>,
     status: Option<(String, bool)>,
@@ -354,6 +389,20 @@ pub struct App {
     allow_close: bool,
 }
 
+// The window is its active pane: existing code reads and writes the view's fields straight off
+// the App, and only looks up App-level fields when a name isn't found on the Pane.
+impl std::ops::Deref for App {
+    type Target = Pane;
+    fn deref(&self) -> &Pane {
+        &self.tabs[self.active_tab]
+    }
+}
+impl std::ops::DerefMut for App {
+    fn deref_mut(&mut self) -> &mut Pane {
+        &mut self.tabs[self.active_tab]
+    }
+}
+
 impl App {
     pub fn new(ctx: &egui::Context, start: PathBuf, select: Option<PathBuf>) -> Self {
         let language = i18n::read_language(&language_file());
@@ -366,39 +415,19 @@ impl App {
             theme: Theme::new(ctx),
             language,
             last_poll: 0.0,
-            cwd: start.clone(),
-            back: Vec::new(),
-            forward: Vec::new(),
-            entries: Vec::new(),
-            view: Vec::new(),
-            dir_mtime: None,
-            free: None,
+            tabs: vec![Pane::new(start.clone())],
+            active_tab: 0,
             places: files::places(),
             bookmarks: files::bookmarks(&files::bookmarks_file()),
             bookmarks_file: files::bookmarks_file(),
             devices: Vec::new(),
             scanning_devices: false,
-            show_hidden: false,
-            sort: SortKey::Name,
-            ascending: true,
-            grid: false,
-            zoom_list: 1.0,
-            zoom_grid: 1.0,
             zoom_editor: 1.0,
             ui_scale: None,
             opacity: None,
             scale_edit: None,
             compress_format: 0,
 
-            filter: String::new(),
-            focus_filter: false,
-            path_edit: None,
-            selected: HashSet::new(),
-            cursor: None,
-            anchor: None,
-            scroll_to_cursor: false,
-            viewport: (0.0, 0.0),
-            jump: (String::new(), 0.0),
             dialog: None,
             status: None,
             clip: None,
@@ -439,19 +468,22 @@ impl App {
         let saved = std::fs::read_to_string(&file).unwrap_or_default();
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(&saved) {
             let zoom = |key: &str, max: f64| v[key].as_f64().map(|z| z.clamp(0.6, max) as f32);
-            self.grid = v["grid"].as_bool().unwrap_or(self.grid);
-            self.show_hidden = v["show_hidden"].as_bool().unwrap_or(self.show_hidden);
-            self.zoom_list = zoom("zoom_list", 2.5).unwrap_or(self.zoom_list);
-            self.zoom_grid = zoom("zoom_grid", 4.0).unwrap_or(self.zoom_grid);
+            // The saved view belongs to the first tab; the others start at the defaults.
+            self.tabs[0].grid = v["grid"].as_bool().unwrap_or(self.tabs[0].grid);
+            self.tabs[0].show_hidden = v["show_hidden"]
+                .as_bool()
+                .unwrap_or(self.tabs[0].show_hidden);
+            self.tabs[0].zoom_list = zoom("zoom_list", 2.5).unwrap_or(self.tabs[0].zoom_list);
+            self.tabs[0].zoom_grid = zoom("zoom_grid", 4.0).unwrap_or(self.tabs[0].zoom_grid);
             self.zoom_editor = zoom("zoom_editor", 3.0).unwrap_or(self.zoom_editor);
             self.ui_scale = v["ui_scale"].as_f64().map(|z| z.clamp(0.75, 3.0) as f32);
             self.opacity = v["opacity"].as_f64().map(|o| o.clamp(0.3, 1.0) as f32);
-            self.ascending = v["ascending"].as_bool().unwrap_or(self.ascending);
-            self.sort = match v["sort"].as_str() {
+            self.tabs[0].ascending = v["ascending"].as_bool().unwrap_or(self.tabs[0].ascending);
+            self.tabs[0].sort = match v["sort"].as_str() {
                 Some("size") => SortKey::Size,
                 Some("modified") => SortKey::Modified,
                 Some("name") => SortKey::Name,
-                _ => self.sort,
+                _ => self.tabs[0].sort,
             };
             // The first folder was asked for with the old sort order; ask again with this one.
             self.go(self.cwd.clone(), None, false);
@@ -737,8 +769,10 @@ impl App {
         let path = load.path;
         let select = load.select;
         if load.history && path != self.cwd {
-            self.back.push(std::mem::replace(&mut self.cwd, path));
-            self.forward.clear();
+            // Both fields live on the Pane; one borrow of it keeps them apart.
+            let pane = &mut self.tabs[self.active_tab];
+            pane.back.push(std::mem::replace(&mut pane.cwd, path));
+            pane.forward.clear();
         } else {
             self.cwd = path;
         }
@@ -783,8 +817,10 @@ impl App {
                     && (needle.is_empty() || e.name.to_lowercase().contains(&needle))
             })
             .collect();
-        let visible: HashSet<&PathBuf> = self.view.iter().map(|&i| &self.entries[i].path).collect();
-        self.selected.retain(|p| visible.contains(p));
+        // Both fields live on the Pane; one borrow of it keeps them apart.
+        let pane = &mut self.tabs[self.active_tab];
+        let visible: HashSet<&PathBuf> = pane.view.iter().map(|&i| &pane.entries[i].path).collect();
+        pane.selected.retain(|p| visible.contains(p));
         if self.cursor.is_some_and(|c| c >= self.view.len()) {
             self.cursor = self.view.len().checked_sub(1);
         }
@@ -830,8 +866,11 @@ impl App {
             if !mods.command {
                 self.selected.clear();
             }
+            // Both fields live on the Pane; one borrow of it keeps them apart.
+            let pane = &mut self.tabs[self.active_tab];
             for j in a.min(i)..=a.max(i) {
-                self.selected.insert(self.entry(j).path.clone());
+                pane.selected
+                    .insert(pane.entries[pane.view[j]].path.clone());
             }
         } else if mods.command {
             if !self.selected.remove(&path) {
@@ -1767,7 +1806,9 @@ impl App {
             }
             Action::Forward => {
                 if let Some(p) = self.forward.pop() {
-                    self.back.push(self.cwd.clone());
+                    // Both fields live on the Pane; one borrow of it keeps them apart.
+                    let pane = &mut self.tabs[self.active_tab];
+                    pane.back.push(pane.cwd.clone());
                     self.go(p, None, false);
                 }
             }
@@ -4131,12 +4172,14 @@ impl App {
     }
 
     fn search_key(&mut self, key: Key, m: Modifiers, ctx: &egui::Context) {
+        // The pane's zoom, read before `search` borrows the App for its whole body.
+        let zoom_list = self.zoom_list;
         let Some(s) = self.search.as_mut() else {
             return;
         };
         let rows = Self::search_rows(s);
         let last = rows.len().saturating_sub(1);
-        let page = ((s.viewport.1 / (26.0 * self.zoom_list)) as usize).max(1);
+        let page = ((s.viewport.1 / (26.0 * zoom_list)) as usize).max(1);
         let mut moved = true;
         match key {
             Key::Escape => self.pending.push(Action::CloseSearch),
@@ -5116,5 +5159,23 @@ mod props_tests {
             panic!("no dialog")
         };
         assert_eq!(props.usage, Some((2, 0, 13)));
+    }
+}
+
+#[cfg(test)]
+mod pane_tests {
+    use super::*;
+
+    #[test]
+    fn app_derefs_to_the_active_pane() {
+        let dir = std::env::temp_dir().join(format!("ferry-pane-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let ctx = egui::Context::default();
+        let app = App::new(&ctx, dir.clone(), None);
+        // Deref: reading a pane field through the App works.
+        assert_eq!(app.cwd, dir);
+        assert_eq!(app.tabs.len(), 1);
+        assert_eq!(app.active_tab, 0);
     }
 }
