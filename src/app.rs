@@ -123,6 +123,10 @@ enum Action {
     PasteText(String),
     CopyPath,
     Terminal,
+    /// Show or hide the split view's right pane.
+    ToggleSplit,
+    /// Move activity between the left (tab) and right (split) panes.
+    SwitchPane,
     /// Open a new tab in the active pane's folder.
     NewTab,
     /// Close the tab at this index (quitting when it is the last one).
@@ -150,9 +154,16 @@ struct Dragged {
     folders: Vec<PathBuf>,
 }
 
+/// Which pane a folder read belongs to: a tab by index, or the split's right pane.
+#[derive(Clone, Copy, PartialEq)]
+enum PaneId {
+    Tab(usize),
+    Split,
+}
+
 /// A folder read on a background thread.
 struct Load {
-    pane: usize,
+    pane: PaneId,
     generation: u64,
     path: PathBuf,
     select: Option<PathBuf>,
@@ -344,6 +355,8 @@ struct Clip {
 /// A finished background job; `job` is false for fire-and-forget launches that only report failures.
 struct Done {
     job: bool,
+    // The pane the work was aimed at; a finished job refreshes that one.
+    pane: PaneId,
     result: Result<String, String>,
 }
 
@@ -355,6 +368,10 @@ pub struct App {
 
     tabs: Vec<Pane>,
     active_tab: usize,
+    /// The split view's right pane; it dies with the split.
+    split: Option<Pane>,
+    /// Which pane gets keys and clicks: false is the left (tab) pane, true the right one.
+    active_pane: bool,
     places: Vec<(String, PathBuf, char)>,
     bookmarks: Vec<(String, PathBuf)>,
     bookmarks_file: PathBuf,
@@ -388,6 +405,10 @@ pub struct App {
     settings_file: Option<PathBuf>,
     saved_settings: String,
     editor: Option<crate::editor::Editor>,
+    /// Which pane the open editor came from, so closing it refreshes that one.
+    editor_pane: PaneId,
+    /// Which pane opened the current dialog, so confirming it lands there.
+    dialog_pane: PaneId,
     focus_editor: bool,
     /// The syntax colors made from the palette they were made from.
     code_theme: Option<(Palette, syntect::highlighting::Theme)>,
@@ -404,16 +425,29 @@ pub struct App {
 }
 
 // The window is its active pane: existing code reads and writes the view's fields straight off
-// the App, and only looks up App-level fields when a name isn't found on the Pane.
+// the App, and only looks up App-level fields when a name isn't found on the Pane. With the
+// split open, "active" can mean either half.
 impl std::ops::Deref for App {
     type Target = Pane;
     fn deref(&self) -> &Pane {
-        &self.tabs[self.active_tab]
+        if self.active_pane
+            && let Some(pane) = self.split.as_ref()
+        {
+            pane
+        } else {
+            &self.tabs[self.active_tab]
+        }
     }
 }
 impl std::ops::DerefMut for App {
     fn deref_mut(&mut self) -> &mut Pane {
-        &mut self.tabs[self.active_tab]
+        if self.active_pane
+            && let Some(pane) = self.split.as_mut()
+        {
+            pane
+        } else {
+            &mut self.tabs[self.active_tab]
+        }
     }
 }
 
@@ -431,6 +465,8 @@ impl App {
             last_poll: 0.0,
             tabs: vec![Pane::new(start.clone())],
             active_tab: 0,
+            split: None,
+            active_pane: false,
             places: files::places(),
             bookmarks: files::bookmarks(&files::bookmarks_file()),
             bookmarks_file: files::bookmarks_file(),
@@ -457,6 +493,8 @@ impl App {
             settings_file: None,
             saved_settings: String::new(),
             editor: None,
+            editor_pane: PaneId::Tab(0),
+            dialog_pane: PaneId::Tab(0),
             focus_editor: false,
             code_theme: None,
             editor_layout: None,
@@ -704,18 +742,50 @@ impl App {
     /// autofs blocks until it answers), and the window must keep drawing meanwhile. Only the
     /// newest request is applied, so clicking on while a slow folder loads just moves on.
     fn load(&mut self, path: PathBuf, select: Option<PathBuf>, history: bool, fresh: bool) {
-        let pane = self.active_tab;
-        self.load_gen += 1;
-        let generation = self.load_gen;
-        if fresh {
-            self.loading = Some(path.clone());
+        let pane = if self.active_pane && self.split.is_some() {
+            PaneId::Split
+        } else {
+            PaneId::Tab(self.active_tab)
+        };
+        self.load_into(pane, path, select, history, fresh);
+    }
+
+    /// `load`, aimed at a pane that isn't necessarily the active one: opening the split must
+    /// read its right pane while the left keeps activity.
+    fn load_into(
+        &mut self,
+        pane: PaneId,
+        path: PathBuf,
+        select: Option<PathBuf>,
+        history: bool,
+        fresh: bool,
+    ) {
+        let (tx, ctx) = (self.load_tx.clone(), self.ctx.clone());
+        let target = match pane {
+            PaneId::Tab(i) => &mut self.tabs[i],
+            PaneId::Split => self.split.as_mut().expect("the split pane exists"),
+        };
+        let (sort, ascending) = (target.sort, target.ascending);
+        // The borrow ends here: the pane is stamped through a fresh lookup.
+        match pane {
+            PaneId::Tab(i) => {
+                self.tabs[i].load_gen += 1;
+                if fresh {
+                    self.tabs[i].loading = Some(path.clone());
+                }
+            }
+            PaneId::Split => {
+                let slot = self.split.as_mut().expect("the split pane exists");
+                slot.load_gen += 1;
+                if fresh {
+                    slot.loading = Some(path.clone());
+                }
+            }
         }
-        let (tx, ctx, sort, ascending) = (
-            self.load_tx.clone(),
-            self.ctx.clone(),
-            self.sort,
-            self.ascending,
-        );
+        let generation = match pane {
+            PaneId::Tab(i) => self.tabs[i].load_gen,
+            PaneId::Split => self.split.as_ref().expect("the split pane exists").load_gen,
+        };
         std::thread::spawn(move || {
             let result = files::list(&path).map(|mut entries| {
                 files::sort(&mut entries, sort, ascending);
@@ -740,11 +810,15 @@ impl App {
     fn loaded(&mut self, load: Load) {
         // Route by the pane that started the load. A closed pane is dropped; a generation
         // mismatch means a newer load of that same pane superseded this one — both silently.
-        let i = load.pane;
-        if i >= self.tabs.len() || self.tabs[i].load_gen != load.generation {
+        let target = match load.pane {
+            PaneId::Tab(i) => self.tabs.get_mut(i),
+            PaneId::Split => self.split.as_mut(),
+        };
+        let Some(target) = target else { return };
+        if target.load_gen != load.generation {
             return;
         }
-        self.tabs[i].loading = None;
+        target.loading = None;
         let entries = match load.result {
             Ok(entries) => entries,
             // Asked to open a file: show its folder with the file selected.
@@ -765,14 +839,17 @@ impl App {
             }
             Err(e) => return self.error(format!("{}: {e}", load.path.display())),
         };
-        self.tabs[i].dir_mtime = load.mtime;
-        self.tabs[i].free = load.free;
+        target.dir_mtime = load.mtime;
+        target.free = load.free;
         if load.fresh {
             self.thumbs.clear();
         }
-        // The helpers below take `&mut App` and reach the active tab through Deref, so they are
-        // called on `self` with the routing index stashed in the active slot for their duration.
-        let was_active = std::mem::replace(&mut self.active_tab, i);
+        // The helpers below take `&mut App` and reach the active pane through Deref, so they are
+        // called on `self` with the routing index stashed in the active slots for their duration.
+        let (was_tab, was_pane) = match load.pane {
+            PaneId::Tab(i) => (std::mem::replace(&mut self.active_tab, i), false),
+            PaneId::Split => (0, std::mem::replace(&mut self.active_pane, true)),
+        };
         if !load.fresh {
             let cursor = self.cursor_entry().map(|e| e.path.clone());
             self.entries = entries;
@@ -788,9 +865,9 @@ impl App {
             let select = load.select;
             if load.history && path != self.cwd {
                 // Both fields live on the Pane; one borrow of it keeps them apart.
-                let pane = &mut self.tabs[self.active_tab];
-                pane.back.push(std::mem::replace(&mut pane.cwd, path));
-                pane.forward.clear();
+                let from = std::mem::replace(&mut self.cwd, path);
+                self.back.push(from);
+                self.forward.clear();
             } else {
                 self.cwd = path;
             }
@@ -808,9 +885,18 @@ impl App {
             self.viewport.0 = 0.0;
             self.scroll_to_cursor = true;
         }
-        self.active_tab = was_active;
-        let name = self.tabs[i]
-            .cwd
+        self.active_tab = was_tab;
+        self.active_pane = was_pane;
+        let name = match load.pane {
+            PaneId::Tab(i) => &self.tabs[i].cwd,
+            PaneId::Split => self
+                .split
+                .as_ref()
+                .expect("the split pane exists")
+                .cwd
+                .as_path(),
+        };
+        let name = name
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| "/".into());
@@ -838,9 +924,12 @@ impl App {
             })
             .collect();
         // Both fields live on the Pane; one borrow of it keeps them apart.
-        let pane = &mut self.tabs[self.active_tab];
-        let visible: HashSet<&PathBuf> = pane.view.iter().map(|&i| &pane.entries[i].path).collect();
-        pane.selected.retain(|p| visible.contains(p));
+        let visible: HashSet<PathBuf> = self
+            .view
+            .iter()
+            .map(|&i| self.entries[i].path.clone())
+            .collect();
+        self.selected.retain(|p| visible.contains(p));
         if self.cursor.is_some_and(|c| c >= self.view.len()) {
             self.cursor = self.view.len().checked_sub(1);
         }
@@ -887,10 +976,11 @@ impl App {
                 self.selected.clear();
             }
             // Both fields live on the Pane; one borrow of it keeps them apart.
-            let pane = &mut self.tabs[self.active_tab];
-            for j in a.min(i)..=a.max(i) {
-                pane.selected
-                    .insert(pane.entries[pane.view[j]].path.clone());
+            let paths: Vec<PathBuf> = (a.min(i)..=a.max(i))
+                .map(|j| self.entries[self.view[j]].path.clone())
+                .collect();
+            for p in paths {
+                self.selected.insert(p);
             }
         } else if mods.command {
             if !self.selected.remove(&path) {
@@ -970,9 +1060,15 @@ impl App {
         self.busy += 1;
         self.status = Some((label, false));
         let (tx, ctx) = (self.tx.clone(), self.ctx.clone());
+        let pane = if self.active_pane && self.split.is_some() {
+            PaneId::Split
+        } else {
+            PaneId::Tab(self.active_tab)
+        };
         std::thread::spawn(move || {
             let _ = tx.send(Done {
                 job: true,
+                pane,
                 result: work(),
             });
             ctx.request_repaint();
@@ -990,6 +1086,7 @@ impl App {
                         let message = tr("Couldn't open %1").replace("%1", &what);
                         let _ = tx.send(Done {
                             job: false,
+                            pane: PaneId::Tab(0),
                             result: Err(message),
                         });
                         ctx.request_repaint();
@@ -1058,7 +1155,7 @@ impl App {
                 ctx.request_repaint();
             }
         });
-        self.dialog = Some(Dialog::Properties(Box::new(Props {
+        self.open_dialog(Dialog::Properties(Box::new(Props {
             paths,
             tab: 0,
             info: None,
@@ -1360,7 +1457,7 @@ impl App {
     }
 
     fn ask_extract(&mut self, path: PathBuf) {
-        self.dialog = Some(Dialog::Extract {
+        self.open_dialog(Dialog::Extract {
             path: path.clone(),
             listing: None,
         });
@@ -1387,6 +1484,13 @@ impl App {
         if self.editor.as_ref().is_some_and(|e| e.dirty()) {
             return self.error(tr("Save or close the file being edited first"));
         }
+        // The editor covers the whole window; remember which pane it came from so closing it
+        // refreshes that one.
+        self.editor_pane = if self.active_pane && self.split.is_some() {
+            PaneId::Split
+        } else {
+            PaneId::Tab(self.active_tab)
+        };
         self.editor = Some(crate::editor::Editor::loading(path.clone()));
         let (tx, ctx) = (self.load_tx.clone(), self.ctx.clone());
         std::thread::spawn(move || {
@@ -1505,8 +1609,20 @@ impl App {
     fn close_editor(&mut self) {
         if let Some(editor) = self.editor.take() {
             self.folder_title();
-            // Select the file just edited, with its new size and date.
+            // Select the file just edited, with its new size and date — in the pane it came
+            // from; a closed tab or split falls back to the active pane.
+            let target = match self.editor_pane {
+                PaneId::Tab(i) if i < self.tabs.len() => (i, false),
+                PaneId::Split if self.split.is_some() => (0, true),
+                _ => (self.active_tab, self.active_pane && self.split.is_some()),
+            };
+            let (was_tab, was_pane) = match target {
+                (i, false) => (std::mem::replace(&mut self.active_tab, i), false),
+                (_, true) => (0, std::mem::replace(&mut self.active_pane, true)),
+            };
             self.reload(Some(editor.path));
+            self.active_tab = was_tab;
+            self.active_pane = was_pane;
         }
     }
 
@@ -1816,13 +1932,31 @@ impl App {
 
     fn apply(&mut self, action: Action) {
         match action {
+            Action::ToggleSplit => {
+                if self.split.is_some() {
+                    // Closing: the right pane's place is gone with it.
+                    self.split = None;
+                    self.active_pane = false;
+                } else {
+                    // Store the pane first so `load_into` bumps its generation from 0 to 1;
+                    // a load started before the pane exists would race a later one at gen 1.
+                    let cwd = self.cwd.clone();
+                    self.split = Some(Pane::new(cwd.clone()));
+                    self.load_into(PaneId::Split, cwd, None, false, true);
+                }
+            }
+            Action::SwitchPane => {
+                if self.split.is_some() {
+                    self.active_pane = !self.active_pane;
+                }
+            }
             Action::NewTab => {
                 let cwd = self.cwd.clone();
-                self.tabs
-                    .insert(self.active_tab + 1, Pane::new(cwd.clone()));
-                self.active_tab += 1;
+                let i = self.active_tab + 1;
+                self.tabs.insert(i, Pane::new(cwd.clone()));
                 // Re-read the folder so the new tab shows its contents.
-                self.load(cwd, None, false, true);
+                self.load_into(PaneId::Tab(i), cwd, None, false, true);
+                self.active_tab = i;
             }
             Action::CloseTab(i) => {
                 if self.tabs.len() == 1 {
@@ -1837,18 +1971,21 @@ impl App {
                     // Closing a tab before it shifts the active one down by one.
                     self.active_tab -= 1;
                 }
-                self.load(self.cwd.clone(), None, false, true);
+                let cwd = self.cwd.clone();
+                self.load_into(PaneId::Tab(self.active_tab), cwd, None, false, true);
             }
             Action::NextTab => {
                 if self.tabs.len() > 1 {
+                    let cwd = self.cwd.clone();
                     self.active_tab = (self.active_tab + 1) % self.tabs.len();
-                    self.load(self.cwd.clone(), None, false, true);
+                    self.load_into(PaneId::Tab(self.active_tab), cwd, None, false, true);
                 }
             }
             Action::PrevTab => {
                 if self.tabs.len() > 1 {
+                    let cwd = self.cwd.clone();
                     self.active_tab = (self.active_tab + self.tabs.len() - 1) % self.tabs.len();
-                    self.load(self.cwd.clone(), None, false, true);
+                    self.load_into(PaneId::Tab(self.active_tab), cwd, None, false, true);
                 }
             }
             Action::Go(p) => self.go(p, None, true),
@@ -1862,8 +1999,8 @@ impl App {
             Action::Forward => {
                 if let Some(p) = self.forward.pop() {
                     // Both fields live on the Pane; one borrow of it keeps them apart.
-                    let pane = &mut self.tabs[self.active_tab];
-                    pane.back.push(pane.cwd.clone());
+                    let from = self.cwd.clone();
+                    self.back.push(from);
                     self.go(p, None, false);
                 }
             }
@@ -1897,7 +2034,7 @@ impl App {
             Action::AskDelete => {
                 let paths = self.targets();
                 if !paths.is_empty() {
-                    self.dialog = Some(Dialog::Delete { paths });
+                    self.open_dialog(Dialog::Delete { paths });
                 }
             }
             Action::AskRename => {
@@ -1907,19 +2044,17 @@ impl App {
                         .file_name()
                         .map(|n| n.to_string_lossy().into_owned())
                         .unwrap_or_default();
-                    self.dialog = Some(Dialog::Rename {
+                    self.open_dialog(Dialog::Rename {
                         path,
                         text,
                         error: None,
                     });
                 }
             }
-            Action::AskNewFolder => {
-                self.dialog = Some(Dialog::NewFolder {
-                    text: tr("New Folder"),
-                    error: None,
-                })
-            }
+            Action::AskNewFolder => self.open_dialog(Dialog::NewFolder {
+                text: tr("New Folder"),
+                error: None,
+            }),
             Action::Copy | Action::Cut => {
                 let cut = matches!(action, Action::Cut);
                 let paths = self.targets();
@@ -2010,12 +2145,10 @@ impl App {
                 self.bookmarks = files::bookmarks(&self.bookmarks_file);
             }
             Action::EditText(path) => self.open_editor(path, true),
-            Action::AskNewFile => {
-                self.dialog = Some(Dialog::NewFile {
-                    text: tr("untitled.txt"),
-                    error: None,
-                })
-            }
+            Action::AskNewFile => self.open_dialog(Dialog::NewFile {
+                text: tr("untitled.txt"),
+                error: None,
+            }),
             Action::Search => self.open_search(),
             Action::CloseSearch => self.close_search(),
             Action::OpenFound { path, is_dir, line } => {
@@ -2118,7 +2251,7 @@ impl App {
                 let paths = self.targets();
                 if !paths.is_empty() {
                     let name = crate::archive::suggested_name(&paths, &self.cwd);
-                    self.dialog = Some(Dialog::Compress {
+                    self.open_dialog(Dialog::Compress {
                         paths,
                         name,
                         fs: self.compress_format,
@@ -2137,7 +2270,7 @@ impl App {
                     } else {
                         d.name.clone()
                     };
-                    self.dialog = Some(Dialog::Format {
+                    self.open_dialog(Dialog::Format {
                         device: d,
                         fs: 0,
                         label,
@@ -2275,7 +2408,7 @@ impl App {
                 Event::Text(t) if !typing => {
                     let fresh = self.jump.0.is_empty() || now - self.jump.1 > 1.0;
                     match t.as_str() {
-                        "?" if fresh => self.dialog = Some(Dialog::Help),
+                        "?" if fresh => self.open_dialog(Dialog::Help),
                         " " if fresh => {} // the Space key itself opens
                         _ => self.jump_to(&t, now),
                     }
@@ -2325,11 +2458,13 @@ impl App {
             Key::Space if self.jump.0.is_empty() || now - self.jump.1 > 1.0 => Some(Action::Open),
             Key::Backspace => Some(Action::Back),
             Key::F1 => {
-                self.dialog = Some(Dialog::Help);
+                self.open_dialog(Dialog::Help);
                 None
             }
             Key::F2 => Some(Action::AskRename),
+            Key::F3 => Some(Action::ToggleSplit),
             Key::F4 => Some(Action::Terminal),
+            Key::F6 => Some(Action::SwitchPane),
             // Alt+X opens a terminal too, for people who reach it from the tab strip.
             Key::X if m.alt => Some(Action::Terminal),
             Key::F5 => Some(Action::Refresh),
@@ -2426,8 +2561,14 @@ impl App {
     }
 
     fn viewport_width(&self) -> f32 {
+        // In the split view each half keeps its own width; see `folder`.
+        let key = if self.active_pane && self.split.is_some() {
+            "ferry-width-split"
+        } else {
+            "ferry-width"
+        };
         self.ctx
-            .memory(|m| m.data.get_temp::<f32>(egui::Id::unique("ferry-width")))
+            .memory(|m| m.data.get_temp::<f32>(egui::Id::unique(key)))
             .unwrap_or(800.0)
     }
 
@@ -2580,8 +2721,10 @@ impl App {
         if let Some(i) = close_at {
             self.pending.push(Action::CloseTab(i));
         } else if let Some(i) = switch_to.filter(|&i| i != self.active_tab) {
+            // Switching tabs means the left pane: the right one keeps its own activity.
+            self.active_pane = false;
             self.active_tab = i;
-            self.load(self.cwd.clone(), None, false, true);
+            self.load_into(PaneId::Tab(i), self.cwd.clone(), None, false, true);
         }
     }
 
@@ -2918,12 +3061,10 @@ impl App {
                     ui.label(RichText::new(message).color(if *error { p.red } else { p.fg }));
                 }
                 None => {
-                    let folders = self
-                        .view
-                        .iter()
-                        .filter(|&&i| self.entries[i].is_dir)
-                        .count();
-                    let files_n = self.view.len() - folders;
+                    // The counts are the active pane's, through Deref.
+                    let (view, entries) = (&self.view, &self.entries);
+                    let folders = view.iter().filter(|&&i| entries[i].is_dir).count();
+                    let files_n = view.len() - folders;
                     let mut text = format!(
                         "{}, {}",
                         trn("%n folders", folders),
@@ -2974,8 +3115,15 @@ impl App {
 
     fn folder(&mut self, ui: &mut Ui) {
         let p = self.p();
+        // The width is shared state (grid columns fit it); in the split view each half keeps its
+        // own, keyed by which pane it draws.
+        let key = if self.active_pane && self.split.is_some() {
+            "ferry-width-split"
+        } else {
+            "ferry-width"
+        };
         ui.ctx()
-            .data_mut(|d| d.insert_temp(egui::Id::unique("ferry-width"), ui.available_width()));
+            .data_mut(|d| d.insert_temp(egui::Id::unique(key), ui.available_width()));
         // The background sits under the files: clicking it clears the selection, right-clicking
         // it offers what can be done in the folder itself.
         let background = ui.interact(
@@ -3007,6 +3155,45 @@ impl App {
             self.grid_view(ui, &p)
         } else {
             self.details_view(ui, &p)
+        }
+    }
+
+    /// The split view: two side-by-side halves, each its own pane and scroll area. The left is
+    /// the active tab, the right the split's pane; whichever is active gets an accent border.
+    fn split_view(&mut self, ui: &mut Ui) {
+        let p = self.p();
+        let r = CornerRadius::same(self.theme.radius().min(4));
+        let left = ui.available_rect_before_wrap();
+        let half = left.width() / 2.0;
+        let gap = 6.0;
+        let left_rect = Rect::from_min_size(left.min, vec2(half - gap / 2.0, left.height()));
+        let right_rect = Rect::from_min_size(
+            egui::pos2(left.max.x - half + gap / 2.0, left.min.y),
+            vec2(half - gap / 2.0, left.height()),
+        );
+        for (rect, is_split) in [(left_rect, false), (right_rect, true)] {
+            let active = self.active_pane == is_split;
+            ui.painter().rect_stroke(
+                rect.shrink(1.0),
+                r,
+                Stroke::new(1.0, if active { p.accent } else { p.muted }),
+                egui::StrokeKind::Inside,
+            );
+            // `folder` reads through DerefMut, so force the half's own pane for its duration.
+            let was = std::mem::replace(&mut self.active_pane, is_split);
+            ui.allocate_space(rect.size());
+            // A different scope id per half: the scroll areas stay independent.
+            ui.scope_builder(
+                egui::UiBuilder::new()
+                    .id_salt(if is_split {
+                        "split-right"
+                    } else {
+                        "split-left"
+                    })
+                    .max_rect(rect),
+                |ui| self.folder(ui),
+            );
+            self.active_pane = was;
         }
     }
 
@@ -3455,6 +3642,7 @@ impl App {
         let Some(dialog) = &mut self.dialog else {
             return;
         };
+
         let p = self.theme.palette;
         let (enter, escape) =
             ctx.input(|i| (i.key_pressed(Key::Enter), i.key_pressed(Key::Escape)));
@@ -3765,8 +3953,26 @@ impl App {
                 }
             }
         } else if confirm {
+            // The dialog was opened from the active pane; its result lands there, not in
+            // whichever pane happens to be active when Enter is pressed.
+            let (was_tab, was_pane) = match self.dialog_pane {
+                PaneId::Tab(i) => (std::mem::replace(&mut self.active_tab, i), false),
+                PaneId::Split => (0, std::mem::replace(&mut self.active_pane, true)),
+            };
             self.confirm();
+            self.active_tab = was_tab;
+            self.active_pane = was_pane;
         }
+    }
+
+    /// Opens a dialog from the active pane, remembering it so confirming lands there.
+    fn open_dialog(&mut self, dialog: Dialog) {
+        self.dialog_pane = if self.active_pane && self.split.is_some() {
+            PaneId::Split
+        } else {
+            PaneId::Tab(self.active_tab)
+        };
+        self.dialog = Some(dialog);
     }
 
     fn confirm(&mut self) {
@@ -3898,7 +4104,20 @@ impl App {
         while let Ok(done) = self.rx.try_recv() {
             if done.job {
                 self.busy = self.busy.saturating_sub(1);
+                // Refresh the pane the work was aimed at, not whichever is active now. A closed
+                // tab (or a split that died meanwhile) falls back to the active pane.
+                let target = match done.pane {
+                    PaneId::Tab(i) if i < self.tabs.len() => (i, false),
+                    PaneId::Split if self.split.is_some() => (0, true),
+                    _ => (self.active_tab, self.active_pane && self.split.is_some()),
+                };
+                let (was_tab, was_pane) = match target {
+                    (i, false) => (std::mem::replace(&mut self.active_tab, i), false),
+                    (_, true) => (0, std::mem::replace(&mut self.active_pane, true)),
+                };
                 self.refresh();
+                self.active_tab = was_tab;
+                self.active_pane = was_pane;
             }
             self.status = Some(match done.result {
                 Ok(message) => (message, false),
@@ -4001,19 +4220,50 @@ impl App {
                 Loaded::Check { path, mtime, free } => {
                     // Route by path, like a finished load: the check belongs to the pane
                     // showing that folder, and only if it is not loading one right now.
-                    if let Some(i) = self.tabs.iter().position(|t| t.cwd == path)
-                        && !self.tabs[i].loading.is_some()
+                    let mut id = None;
+                    for (i, t) in self.tabs.iter().enumerate() {
+                        if t.cwd == path && t.loading.is_none() {
+                            id = Some(PaneId::Tab(i));
+                            break;
+                        }
+                    }
+                    if id.is_none()
+                        && let Some(s) = self.split.as_ref()
+                        && s.cwd == path
+                        && s.loading.is_none()
                     {
-                        let pane = &mut self.tabs[i];
-                        pane.checking = false;
-                        pane.free = free;
-                        if mtime != pane.dir_mtime {
-                            // `reload` takes `&mut App` and reaches the active tab through Deref,
+                        id = Some(PaneId::Split);
+                    }
+                    if let Some(id) = id {
+                        let changed = match id {
+                            PaneId::Tab(i) => {
+                                let pane = &mut self.tabs[i];
+                                pane.checking = false;
+                                pane.free = free;
+                                mtime != pane.dir_mtime
+                            }
+                            PaneId::Split => {
+                                let pane = self.split.as_mut().expect("the split pane exists");
+                                pane.checking = false;
+                                pane.free = free;
+                                mtime != pane.dir_mtime
+                            }
+                        };
+                        if changed {
+                            // `reload` takes `&mut App` and reaches the active pane through Deref,
                             // so it is called on `self` with the routing index stashed in the
-                            // active slot for its duration.
-                            let was_active = std::mem::replace(&mut self.active_tab, i);
+                            // active slots for its duration.
+                            let (was_tab, was_pane) = match id {
+                                PaneId::Tab(i) => {
+                                    (std::mem::replace(&mut self.active_tab, i), false)
+                                }
+                                PaneId::Split => {
+                                    (0, std::mem::replace(&mut self.active_pane, true))
+                                }
+                            };
                             self.reload(None);
-                            self.active_tab = was_active;
+                            self.active_tab = was_tab;
+                            self.active_pane = was_pane;
                         }
                     }
                 }
@@ -4038,7 +4288,7 @@ impl App {
             }
             // Off the UI thread too: the shown folder may sit on a mount that stops answering.
             // Every pane is watched, not just the active one; each skips while it checks or loads.
-            for pane in self.tabs.iter_mut() {
+            let watch = |pane: &mut Pane| {
                 if !pane.checking && pane.loading.is_none() {
                     pane.checking = true;
                     let (tx, ctx, path) = (self.load_tx.clone(), ctx.clone(), pane.cwd.clone());
@@ -4048,6 +4298,12 @@ impl App {
                         ctx.request_repaint();
                     });
                 }
+            };
+            for pane in self.tabs.iter_mut() {
+                watch(pane);
+            }
+            if let Some(pane) = self.split.as_mut() {
+                watch(pane);
             }
             // lsblk is quick, but it's a program: off the UI thread like everything else.
             if !self.scanning_devices {
@@ -4170,6 +4426,8 @@ impl App {
                     self.editor_view(ui);
                 } else if self.search.is_some() {
                     self.search_view(ui);
+                } else if self.split.is_some() {
+                    self.split_view(ui);
                 } else {
                     self.folder(ui);
                 }
@@ -4187,6 +4445,14 @@ impl App {
 impl App {
     /// Starts a search below the shown folder, taking over what the filter had typed.
     fn open_search(&mut self) {
+        // The split's pane keeps its own filter: the search only takes the active pane's.
+        if let Some(pane) = self.split.as_mut() {
+            pane.filter.clear();
+            let was = std::mem::replace(&mut self.active_pane, true);
+            self.rebuild_view();
+            self.active_pane = was;
+        }
+        // The search view takes over the active pane's filter.
         let text = std::mem::take(&mut self.filter);
         self.rebuild_view();
         let typed = (!text.trim().is_empty()).then_some(0.0);
@@ -4213,6 +4479,14 @@ impl App {
             self.search_progress
                 .current
                 .store(self.search_id, std::sync::atomic::Ordering::SeqCst);
+        }
+        if let Some(pane) = self.split.as_mut() {
+            // The split's pane keeps its own filter: closing the search must not touch it.
+            pane.filter.clear();
+            // `rebuild_view` reaches the active pane through Deref, so force it for a moment.
+            let was = std::mem::replace(&mut self.active_pane, true);
+            self.rebuild_view();
+            self.active_pane = was;
         }
     }
 
@@ -4817,6 +5091,8 @@ fn help(ui: &mut Ui, p: &Palette) {
                 ("Ctrl+W", &tr("Close Tab")),
                 ("Ctrl+Tab", &tr("Next Tab")),
                 ("Ctrl+Shift+Tab", &tr("Previous Tab")),
+                ("F3", &tr("Toggle Split View")),
+                ("F6", &tr("Switch Pane")),
                 ("F4 / Alt+X", "Open Terminal Here"),
                 ("F5", "Refresh"),
                 ("Alt+Enter", "Properties"),
@@ -5401,5 +5677,56 @@ mod tabs_tests {
             .map(|&i| app.entries[i].name.clone())
             .collect();
         assert!(names.contains(&"a".to_string()) && names.contains(&"b".to_string()));
+    }
+}
+
+#[cfg(test)]
+mod split_tests {
+    use super::*;
+
+    fn settle(ctx: &egui::Context, app: &mut App) {
+        for _ in 0..30 {
+            std::thread::sleep(Duration::from_millis(10));
+            let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
+                app.poll(ui.ctx());
+                app.draw(ui);
+            });
+            out.textures_delta.clear();
+        }
+    }
+
+    #[test]
+    fn split_toggles_and_switches() {
+        let dir = std::env::temp_dir().join(format!("ferry-split-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("a")).unwrap();
+        std::fs::create_dir_all(dir.join("b")).unwrap();
+        let ctx = egui::Context::default();
+        let mut app = App::new(&ctx, dir.clone(), None);
+        settle(&ctx, &mut app);
+
+        // F3 opens the split; the right pane starts on the same folder.
+        app.apply(Action::ToggleSplit);
+        assert!(app.split.is_some());
+        assert_eq!(app.split.as_ref().unwrap().cwd, dir);
+        assert!(!app.active_pane, "the left (tab) pane stays active");
+
+        // F6 moves activity to the right pane; navigating it leaves the tab alone.
+        app.apply(Action::SwitchPane);
+        assert!(app.active_pane);
+        app.apply(Action::Go(dir.join("b")));
+        settle(&ctx, &mut app);
+        assert_eq!(app.split.as_ref().unwrap().cwd, dir.join("b"));
+        assert_eq!(
+            app.tabs[app.active_tab].cwd, dir,
+            "the tab pane never moved"
+        );
+
+        // F3 again closes the split and drops the right pane.
+        app.apply(Action::SwitchPane);
+        app.apply(Action::ToggleSplit);
+        assert!(app.split.is_none());
+        assert!(!app.active_pane);
+        assert_eq!(app.cwd, dir);
     }
 }
