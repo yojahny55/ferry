@@ -3114,8 +3114,7 @@ impl App {
                     )
                 };
                 let (rect, resp) = ui.allocate_exact_size(vec2(width + 26.0, 30.0), Sense::click());
-                ui.painter()
-                    .rect_filled(rect.shrink(1.0), 6.0, fill);
+                ui.painter().rect_filled(rect.shrink(1.0), 6.0, fill);
                 if active {
                     // A bright top edge sells the "this one is up" feel.
                     let line =
@@ -3557,7 +3556,9 @@ impl App {
         ui.ctx()
             .data_mut(|d| d.insert_temp(egui::Id::unique(key), ui.available_width()));
         // The background sits under the files: clicking it clears the selection, right-clicking
-        // it offers what can be done in the folder itself.
+        // it offers what can be done in the folder itself. In the split view a click also makes
+        // this half the active pane — the only interaction that reaches it (the halves overlap
+        // the parent's, so an earlier interact here would never report a click).
         let background = ui.interact(
             ui.available_rect_before_wrap(),
             ui.scope_id().with("background"),
@@ -3565,6 +3566,9 @@ impl App {
         );
         if background.clicked() {
             self.selected.clear();
+            if self.split.is_some() && !self.active_pane {
+                self.active_pane = true;
+            }
         }
         background.context_menu(|ui| self.folder_menu(ui));
 
@@ -3603,12 +3607,11 @@ impl App {
             egui::pos2(left.max.x - half + gap / 2.0, left.min.y),
             vec2(half - gap / 2.0, left.height()),
         );
-        // A click in a half makes it the active pane: F6 is not the only way to switch.
-        let mut activate = false;
         for (rect, is_split) in [(left_rect, false), (right_rect, true)] {
             let active = self.active_pane == is_split;
             // The half gets its own background so a glassy window never shows the wallpaper
-            // through it: text and icons stay solid over their pane's surface.
+            // through it: text and icons stay solid over their pane's surface. Clicking a half
+            // makes it active — `folder`'s background is what actually receives the click.
             ui.painter()
                 .rect_filled(rect.shrink(1.0), r, self.glass(p.bg));
             ui.painter().rect_stroke(
@@ -3617,10 +3620,6 @@ impl App {
                 Stroke::new(1.0, if active { p.accent } else { p.muted }),
                 egui::StrokeKind::Inside,
             );
-            let hit = ui.interact(rect, ui.scope_id().with("split-hit"), Sense::click());
-            if hit.clicked() && !active {
-                activate = true;
-            }
             // `folder` reads through DerefMut, so force the half's own pane for its duration.
             let was = std::mem::replace(&mut self.active_pane, is_split);
             ui.allocate_space(rect.size());
@@ -3636,9 +3635,6 @@ impl App {
                 |ui| self.folder(ui),
             );
             self.active_pane = was;
-        }
-        if activate {
-            self.active_pane = !self.active_pane;
         }
     }
 
