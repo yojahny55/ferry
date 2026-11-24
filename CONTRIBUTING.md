@@ -39,10 +39,20 @@ cargo test
 | `src/main.rs` | Startup: window options, fonts, command-line path |
 | `src/app.rs` | The window: views, sidebar, keys, dialogs, background folder loading |
 | `src/files.rs` | Everything that touches the disk: listing, sorting, paste, trash, bookmarks |
-| `src/theme.rs` | Reads the Omarchy palette and Hyprland rounding, and styles egui |
+| `src/archive.rs` | Compressing and extracting archives through bsdtar |
+| `src/props.rs` | The Properties dialog's facts: sizes, permissions, checksums |
+| `src/portal.rs` | The desktop's folder picker, through xdg-desktop-portal |
+| `src/devices.rs` | Drives and network shares: listing, mounting, ejecting, formatting |
+| `src/search.rs` | Searching names and file contents below a folder |
+| `src/editor.rs` | The built-in text editor |
+| `src/highlight.rs` | Syntax highlighting in the editor, colored from the theme |
+| `src/markdown.rs` | The editor's Markdown preview |
+| `src/theme.rs` | Reads the Omarchy palette, Hyprland rounding, text scale and opacity, and styles egui |
 | `src/thumbs.rs` | Previews: the freedesktop thumbnail cache and system thumbnailers |
 | `src/dnd.rs` | Dragging files out to other apps over Wayland |
 | `src/i18n.rs` | Translations, following Omarchy's language setting |
+
+Coding agents: [AGENTS.md](AGENTS.md) has the details of how the app is wired and tested.
 
 A few principles hold the code together:
 
