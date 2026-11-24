@@ -120,6 +120,8 @@ enum Action {
     Copy,
     Cut,
     Paste,
+    Undo,
+    Redo,
     PasteText(String),
     CopyPath,
     Terminal,
@@ -358,6 +360,27 @@ struct Done {
     // The pane the work was aimed at; a finished job refreshes that one.
     pane: PaneId,
     result: Result<String, String>,
+    /// A paste's (cut flag, source→destination pairs), so its Op can be recorded on the UI thread.
+    pasted: Option<(bool, Vec<(PathBuf, PathBuf)>)>,
+}
+
+/// One user operation, recorded so it can be reversed. Paths are the ACTUAL ones on disk.
+enum Op {
+    Move {
+        from: Vec<PathBuf>,
+        to: Vec<PathBuf>,
+    },
+    Copy {
+        from: Vec<PathBuf>,
+        to: Vec<PathBuf>,
+    },
+    Rename {
+        from: PathBuf,
+        to: PathBuf,
+    },
+    CreateFolder(PathBuf),
+    CreateFile(PathBuf),
+    Trash(Vec<PathBuf>),
 }
 
 pub struct App {
@@ -390,6 +413,11 @@ pub struct App {
 
     dialog: Option<Dialog>,
     status: Option<(String, bool)>,
+    /// Operations that can be reversed; the newest is last. Redo holds what an undo took back.
+    undo: Vec<Op>,
+    redo: Vec<Op>,
+    /// The paths of a trash job still running, so its Op is recorded when it finishes.
+    trash_pending: Option<Vec<PathBuf>>,
     clip: Option<Clip>,
     busy: usize,
     tx: Sender<Done>,
@@ -480,6 +508,9 @@ impl App {
 
             dialog: None,
             status: None,
+            undo: Vec::new(),
+            redo: Vec::new(),
+            trash_pending: None,
             clip: None,
             busy: 0,
             tx,
@@ -1068,6 +1099,324 @@ impl App {
         self.status = Some((message, true));
     }
 
+    /// Records an operation; a new one clears the redo stack, and the oldest falls off at 20.
+    fn record(&mut self, op: Op) {
+        self.redo.clear();
+        self.undo.push(op);
+        if self.undo.len() > 20 {
+            self.undo.remove(0);
+        }
+    }
+
+    /// What the menu shows for the top operation.
+    fn undo_label(&self) -> String {
+        match self.undo.last() {
+            Some(Op::Move { .. }) => tr("Undo Move"),
+            Some(Op::Copy { .. }) => tr("Undo Copy"),
+            Some(Op::Rename { .. }) => tr("Undo Rename"),
+            Some(Op::CreateFolder(_)) => tr("Undo New Folder"),
+            Some(Op::CreateFile(_)) => tr("Undo New File"),
+            Some(Op::Trash(_)) => tr("Undo Delete"),
+            None => tr("Undo"),
+        }
+    }
+
+    /// The pane an operation touched: the one showing any of its paths, else the active one.
+    fn pane_of(&self, paths: &[PathBuf]) -> PaneId {
+        let mut id = None;
+        for (i, t) in self.tabs.iter().enumerate() {
+            if paths.iter().any(|p| p.starts_with(&t.cwd)) {
+                id = Some(PaneId::Tab(i));
+                break;
+            }
+        }
+        if id.is_none()
+            && let Some(s) = self.split.as_ref()
+            && paths.iter().any(|p| p.starts_with(&s.cwd))
+        {
+            id = Some(PaneId::Split);
+        }
+        id.unwrap_or_else(|| {
+            if self.active_pane && self.split.is_some() {
+                PaneId::Split
+            } else {
+                PaneId::Tab(self.active_tab)
+            }
+        })
+    }
+
+    /// Undoes (or redoes) the top operation, refusing if the disk no longer allows it.
+    fn reverse(&mut self, undo: bool) {
+        let Some(op) = (if undo {
+            self.undo.pop()
+        } else {
+            self.redo.pop()
+        }) else {
+            return;
+        };
+        // Verify everything before touching anything; refuse rather than overwrite.
+        let (ok, message) = match &op {
+            // A move's undo moves the items back, so both ends matter: the new spots must still
+            // hold them and the old spots must be free. A copy's undo only deletes the copies —
+            // the originals were never touched, so they are not checked.
+            Op::Move { from, to } => {
+                let (present, free) = if undo { (to, from) } else { (from, to) };
+                let gone = present.iter().find(|p| !p.exists());
+                let taken = free.iter().find(|p| p.symlink_metadata().is_ok());
+                match (gone, taken) {
+                    (Some(p), _) => (
+                        false,
+                        tr("Cannot undo: %1 is gone").replace("%1", &p.display().to_string()),
+                    ),
+                    (_, Some(p)) => (
+                        false,
+                        tr("Cannot undo: %1 already exists")
+                            .replace("%1", &p.display().to_string()),
+                    ),
+                    _ => (true, String::new()),
+                }
+            }
+            Op::Copy { from, to } => {
+                if undo {
+                    // The copies must still be there to delete them.
+                    let gone = to.iter().find(|p| !p.exists());
+                    match gone {
+                        Some(p) => (
+                            false,
+                            tr("Cannot undo: %1 is gone").replace("%1", &p.display().to_string()),
+                        ),
+                        None => (true, String::new()),
+                    }
+                } else {
+                    // Re-copying needs the originals present and the destinations free.
+                    let gone = from.iter().find(|p| !p.exists());
+                    let taken = to.iter().find(|p| p.symlink_metadata().is_ok());
+                    match (gone, taken) {
+                        (Some(p), _) => (
+                            false,
+                            tr("Cannot undo: %1 is gone").replace("%1", &p.display().to_string()),
+                        ),
+                        (_, Some(p)) => (
+                            false,
+                            tr("Cannot undo: %1 already exists")
+                                .replace("%1", &p.display().to_string()),
+                        ),
+                        _ => (true, String::new()),
+                    }
+                }
+            }
+            Op::Rename { from, to } => {
+                let (present, free) = if undo { (to, from) } else { (from, to) };
+                match (!present.exists(), free.symlink_metadata().is_ok()) {
+                    (true, _) => (
+                        false,
+                        tr("Cannot undo: %1 is gone").replace("%1", &present.display().to_string()),
+                    ),
+                    (_, true) => (
+                        false,
+                        tr("Cannot undo: %1 already exists")
+                            .replace("%1", &free.display().to_string()),
+                    ),
+                    _ => (true, String::new()),
+                }
+            }
+            Op::CreateFolder(p) | Op::CreateFile(p) => {
+                if undo {
+                    // The thing must still be there; a folder only goes when it is empty, so the
+                    // reversal never deletes what the user put in since.
+                    match p.symlink_metadata() {
+                        Ok(m)
+                            if m.is_dir()
+                                && !p.read_dir().is_ok_and(|mut d| d.next().is_none()) =>
+                        {
+                            (
+                                false,
+                                tr("Cannot undo: %1 already exists")
+                                    .replace("%1", &p.display().to_string()),
+                            )
+                        }
+                        Ok(_) => (true, String::new()),
+                        Err(_) => (
+                            false,
+                            tr("Cannot undo: %1 is gone").replace("%1", &p.display().to_string()),
+                        ),
+                    }
+                } else {
+                    if p.symlink_metadata().is_ok() {
+                        (
+                            false,
+                            tr("Cannot undo: %1 already exists")
+                                .replace("%1", &p.display().to_string()),
+                        )
+                    } else {
+                        (true, String::new())
+                    }
+                }
+            }
+            Op::Trash(paths) => {
+                if undo {
+                    // The original spots must be free; the items themselves are in the trash.
+                    let taken = paths.iter().find(|p| p.symlink_metadata().is_ok());
+                    match taken {
+                        Some(p) => (
+                            false,
+                            tr("Cannot undo: %1 already exists")
+                                .replace("%1", &p.display().to_string()),
+                        ),
+                        None => (true, String::new()),
+                    }
+                } else {
+                    // Trashing again needs the items back where they were.
+                    let gone = paths.iter().find(|p| !p.exists());
+                    match gone {
+                        Some(p) => (
+                            false,
+                            tr("Cannot undo: %1 is gone").replace("%1", &p.display().to_string()),
+                        ),
+                        None => (true, String::new()),
+                    }
+                }
+            }
+        };
+        if !ok {
+            // Put the op back so it isn't lost, and tell the user.
+            if undo {
+                self.undo.push(op);
+            } else {
+                self.redo.push(op);
+            }
+            return self.error(message);
+        }
+        // The status message while the reversal runs; the job's own result replaces it.
+        let move_jobs = |from: &[PathBuf], to: &[PathBuf]| {
+            // Each item goes into its partner's folder, as separate moves.
+            to.iter()
+                .zip(from)
+                .map(|(d, s)| {
+                    (
+                        vec![s.clone()],
+                        d.parent().map(PathBuf::from).unwrap_or_default(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        let work: Box<dyn FnOnce() -> Result<(), String> + Send> = match &op {
+            Op::Move { from, to } => {
+                let jobs = if undo {
+                    move_jobs(to, from)
+                } else {
+                    move_jobs(from, to)
+                };
+                Box::new(move || {
+                    for (srcs, dir) in &jobs {
+                        files::paste(srcs, dir, true)?;
+                    }
+                    Ok(())
+                })
+            }
+            Op::Copy { from, to } => {
+                if undo {
+                    // The copies are deleted; the originals were never touched.
+                    let targets = to.clone();
+                    Box::new(move || {
+                        for p in &targets {
+                            files::delete(std::slice::from_ref(p))?;
+                        }
+                        Ok(())
+                    })
+                } else {
+                    // Re-copy each original into its original destination folder.
+                    let jobs = move_jobs(from, to);
+                    Box::new(move || {
+                        for (srcs, dir) in &jobs {
+                            files::paste(srcs, dir, false)?;
+                        }
+                        Ok(())
+                    })
+                }
+            }
+            Op::Rename { from, to } => {
+                let (src, dst) = if undo {
+                    (to.clone(), from.clone())
+                } else {
+                    (from.clone(), to.clone())
+                };
+                Box::new(move || {
+                    std::fs::rename(&src, &dst)
+                        .map(|_| ())
+                        .map_err(|e| e.to_string())
+                })
+            }
+            Op::CreateFolder(p) => {
+                let p = p.clone();
+                if undo {
+                    Box::new(move || files::delete(std::slice::from_ref(&p)).map(|_| ()))
+                } else {
+                    Box::new(move || {
+                        std::fs::create_dir(&p)
+                            .map(|_| ())
+                            .map_err(|e| e.to_string())
+                    })
+                }
+            }
+            Op::CreateFile(p) => {
+                let p = p.clone();
+                if undo {
+                    Box::new(move || files::delete(std::slice::from_ref(&p)).map(|_| ()))
+                } else {
+                    Box::new(move || {
+                        std::fs::OpenOptions::new()
+                            .write(true)
+                            .create_new(true)
+                            .open(&p)
+                            .map(|_| ())
+                            .map_err(|e| e.to_string())
+                    })
+                }
+            }
+            Op::Trash(paths) => {
+                let paths = paths.clone();
+                if undo {
+                    Box::new(move || {
+                        for p in &paths {
+                            files::restore(p)?;
+                        }
+                        Ok(())
+                    })
+                } else {
+                    Box::new(move || files::trash(&paths).map(|_| ()))
+                }
+            }
+        };
+        let paths: Vec<PathBuf> = match &op {
+            Op::Move { from, to } | Op::Copy { from, to } => {
+                from.iter().chain(to.iter()).cloned().collect()
+            }
+            Op::Rename { from, to } => vec![from.clone(), to.clone()],
+            Op::CreateFolder(p) | Op::CreateFile(p) => vec![p.clone()],
+            Op::Trash(paths) => paths.clone(),
+        };
+        let pane = self.pane_of(&paths);
+        // A successful reversal moves the op to the other stack so it can be re-applied.
+        if undo {
+            self.redo.push(op);
+        } else {
+            self.undo.push(op);
+        }
+        self.busy += 1;
+        let (tx, ctx) = (self.tx.clone(), self.ctx.clone());
+        std::thread::spawn(move || {
+            // A finished reversal refreshes its pane and clears the "Undo…" status.
+            let _ = tx.send(Done {
+                job: true,
+                pane,
+                result: work().map(|_| String::new()),
+                pasted: None,
+            });
+            ctx.request_repaint();
+        });
+    }
+
     fn job(
         &mut self,
         label: String,
@@ -1086,6 +1435,34 @@ impl App {
                 job: true,
                 pane,
                 result: work(),
+                pasted: None,
+            });
+            ctx.request_repaint();
+        });
+    }
+
+    /// A paste's own report-back: the pairs it made travel with the result so the Op can be
+    /// recorded on the UI thread.
+    fn paste_job(&mut self, label: String, paths: Vec<PathBuf>, dir: PathBuf, cut: bool) {
+        self.busy += 1;
+        self.status = Some((label, false));
+        let (tx, ctx) = (self.tx.clone(), self.ctx.clone());
+        let pane = if self.active_pane && self.split.is_some() {
+            PaneId::Split
+        } else {
+            PaneId::Tab(self.active_tab)
+        };
+        std::thread::spawn(move || {
+            let result = files::paste(&paths, &dir, cut)
+                .map(|pairs| (trn("Pasted %n items", pairs.len()), (cut, pairs)));
+            let _ = tx.send(Done {
+                job: true,
+                pane,
+                pasted: result.as_ref().ok().map(|(_, p)| p.clone()),
+                result: match result {
+                    Ok((message, _)) => Ok(message),
+                    Err(e) => Err(e),
+                },
             });
             ctx.request_repaint();
         });
@@ -1104,6 +1481,7 @@ impl App {
                             job: false,
                             pane: PaneId::Tab(0),
                             result: Err(message),
+                            pasted: None,
                         });
                         ctx.request_repaint();
                     }
@@ -2043,9 +2421,13 @@ impl App {
                     return;
                 }
                 let n = paths.len();
+                // The paths are known up front, so they travel with the job and its Op is
+                // recorded in poll() once it succeeds.
+                let pending = paths.clone();
                 self.job(tr("Moving to the trash…"), move || {
                     files::trash(&paths).map(|_| trn("Moved %n items to the trash", n))
                 });
+                self.trash_pending = Some(pending);
             }
             Action::AskDelete => {
                 let paths = self.targets();
@@ -2101,6 +2483,8 @@ impl App {
                     self.paste(paths, cut);
                 }
             }
+            Action::Undo => self.reverse(true),
+            Action::Redo => self.reverse(false),
             Action::PasteText(text) => {
                 // shortcut: file:// URIs are taken literally, without percent-decoding; decode them if
                 // pasting from browsers or other file managers turns out to matter.
@@ -2371,9 +2755,7 @@ impl App {
         } else {
             tr("Copying…")
         };
-        self.job(label, move || {
-            files::paste(&paths, &dir, cut).map(|n| trn("Pasted %n items", n))
-        });
+        self.paste_job(label, paths, dir, cut);
     }
 
     // ----- Input ---------------------------------------------------------------------------
@@ -2414,6 +2796,8 @@ impl App {
                         Key::W if m.ctrl => self.pending.push(Action::CloseTab(self.active_tab)),
                         Key::Tab if m.ctrl && !m.shift => self.pending.push(Action::NextTab),
                         Key::Tab if m.ctrl && m.shift => self.pending.push(Action::PrevTab),
+                        Key::Z if m.ctrl && !m.shift => self.pending.push(Action::Undo),
+                        Key::Z if m.ctrl && m.shift => self.pending.push(Action::Redo),
                         _ => {}
                     }
                     if !typing {
@@ -3530,6 +3914,18 @@ impl App {
             (tr("Cut"), "Ctrl+X", Action::Cut, true),
             (tr("Copy"), "Ctrl+C", Action::Copy, true),
             (tr("Copy Path"), "Ctrl+Alt+C", Action::CopyPath, true),
+            (
+                self.undo_label(),
+                "Ctrl+Z",
+                Action::Undo,
+                !self.undo.is_empty(),
+            ),
+            (
+                tr("Redo"),
+                "Ctrl+Shift+Z",
+                Action::Redo,
+                !self.redo.is_empty(),
+            ),
             (tr("Rename…"), "F2", Action::AskRename, single),
             (tr("Move to Trash"), "Del", Action::Trash, true),
             (tr("Delete…"), "Shift+Del", Action::AskDelete, true),
@@ -3619,6 +4015,18 @@ impl App {
             ),
             (tr("New Text File…"), "Ctrl+Alt+N", Action::AskNewFile, true),
             (tr("Paste"), "Ctrl+V", Action::Paste, can_paste),
+            (
+                self.undo_label(),
+                "Ctrl+Z",
+                Action::Undo,
+                !self.undo.is_empty(),
+            ),
+            (
+                tr("Redo"),
+                "Ctrl+Shift+Z",
+                Action::Redo,
+                !self.redo.is_empty(),
+            ),
             (tr("Select All"), "Ctrl+A", Action::SelectAll, true),
             (tr("Open Terminal Here"), "F4", Action::Terminal, true),
             (
@@ -4002,6 +4410,10 @@ impl App {
                 });
                 match result {
                     Ok(target) => {
+                        self.record(Op::Rename {
+                            from: path,
+                            to: target.clone(),
+                        });
                         self.reload(Some(target));
                     }
                     Err(error) => {
@@ -4024,6 +4436,7 @@ impl App {
                 });
                 match result {
                     Ok(target) => {
+                        self.record(Op::CreateFile(target.clone()));
                         self.reload(Some(target.clone()));
                         self.open_editor(target, true);
                     }
@@ -4043,6 +4456,7 @@ impl App {
                 });
                 match result {
                     Ok(target) => {
+                        self.record(Op::CreateFolder(target.clone()));
                         self.reload(Some(target));
                     }
                     Err(error) => {
@@ -4134,6 +4548,22 @@ impl App {
                 self.refresh();
                 self.active_tab = was_tab;
                 self.active_pane = was_pane;
+                // A finished paste reports what it did; its Op is recorded here, on the UI thread.
+                if let Some((cut, pairs)) = done.pasted
+                    && !pairs.is_empty()
+                {
+                    let (from, to): (Vec<_>, Vec<_>) = pairs.iter().cloned().unzip();
+                    self.record(if cut {
+                        Op::Move { from, to }
+                    } else {
+                        Op::Copy { from, to }
+                    });
+                }
+                if let Some(paths) = self.trash_pending.take()
+                    && done.result.is_ok()
+                {
+                    self.record(Op::Trash(paths));
+                }
             }
             self.status = Some(match done.result {
                 Ok(message) => (message, false),
@@ -5092,6 +5522,7 @@ fn help(ui: &mut Ui, p: &Palette) {
                 ("Ctrl+Shift+F", "Search in subfolders"),
                 ("a–z", "Jump to a name"),
                 ("Ctrl+C / Ctrl+X / Ctrl+V", "Copy, cut, paste"),
+                ("Ctrl+Z / Ctrl+Shift+Z", "Undo / Redo"),
                 ("Ctrl+Alt+C", "Copy Path"),
                 ("F2", "Rename"),
                 ("Del", "Move to Trash"),
@@ -5744,5 +6175,273 @@ mod split_tests {
         assert!(app.split.is_none());
         assert!(!app.active_pane);
         assert_eq!(app.cwd, dir);
+    }
+}
+
+#[cfg(test)]
+mod undo_tests {
+    use super::*;
+
+    fn settle(ctx: &egui::Context, app: &mut App) {
+        for _ in 0..30 {
+            std::thread::sleep(Duration::from_millis(10));
+            let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
+                app.poll(ui.ctx());
+                app.draw(ui);
+            });
+            out.textures_delta.clear();
+        }
+    }
+
+    #[test]
+    fn undo_and_redo_a_move() {
+        let dir = std::env::temp_dir().join(format!("ferry-undo-move-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::create_dir_all(dir.join("dst")).unwrap();
+        std::fs::write(dir.join("src/f.txt"), "f").unwrap();
+        let ctx = egui::Context::default();
+        let mut app = App::new(&ctx, dir.clone(), None);
+        settle(&ctx, &mut app);
+
+        // Move src/f.txt into dst/: select it, cut, go to dst, paste.
+        app.apply(Action::Go(dir.join("src")));
+        settle(&ctx, &mut app);
+        app.apply(Action::SelectAll);
+        app.apply(Action::Cut);
+        app.apply(Action::Go(dir.join("dst")));
+        settle(&ctx, &mut app);
+        app.apply(Action::Paste);
+        settle(&ctx, &mut app);
+        assert!(dir.join("dst/f.txt").exists());
+        assert!(!dir.join("src/f.txt").exists());
+
+        // Undo puts it back; redo moves it again.
+        app.apply(Action::Undo);
+        settle(&ctx, &mut app);
+        assert!(dir.join("src/f.txt").exists());
+        assert!(!dir.join("dst/f.txt").exists());
+        app.apply(Action::Redo);
+        settle(&ctx, &mut app);
+        assert!(dir.join("dst/f.txt").exists());
+        assert!(!dir.join("src/f.txt").exists());
+    }
+
+    #[test]
+    fn undo_refuses_when_the_destination_is_taken() {
+        let dir = std::env::temp_dir().join(format!("ferry-undo-refuse-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::create_dir_all(dir.join("dst")).unwrap();
+        std::fs::write(dir.join("src/f.txt"), "f").unwrap();
+        let ctx = egui::Context::default();
+        let mut app = App::new(&ctx, dir.clone(), None);
+        settle(&ctx, &mut app);
+
+        // The same move as above…
+        app.apply(Action::Go(dir.join("src")));
+        settle(&ctx, &mut app);
+        app.apply(Action::SelectAll);
+        app.apply(Action::Cut);
+        app.apply(Action::Go(dir.join("dst")));
+        settle(&ctx, &mut app);
+        app.apply(Action::Paste);
+        settle(&ctx, &mut app);
+        assert!(dir.join("dst/f.txt").exists());
+
+        // …then occupy the original spot before undoing.
+        std::fs::write(dir.join("src/f.txt"), "someone else").unwrap();
+        app.apply(Action::Undo);
+        settle(&ctx, &mut app);
+        // Refused: the file stays where it is, and a status message was set.
+        assert!(dir.join("dst/f.txt").exists());
+        assert_eq!(
+            std::fs::read_to_string(dir.join("src/f.txt")).unwrap(),
+            "someone else"
+        );
+        assert!(app.status.is_some());
+        // The op is still on the stack, waiting for a free spot.
+        assert!(!app.undo.is_empty());
+    }
+
+    #[test]
+    fn undo_depth_is_capped_at_twenty() {
+        let dir = std::env::temp_dir().join(format!("ferry-undo-depth-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for i in 0..21 {
+            std::fs::write(dir.join(format!("n{i}.txt")), "x").unwrap();
+        }
+        let ctx = egui::Context::default();
+        let mut app = App::new(&ctx, dir.clone(), None);
+        settle(&ctx, &mut app);
+
+        // Twenty-one renames through the dialog: each one records an Op.
+        for i in 0..21 {
+            let path = dir.join(format!("n{i}.txt"));
+            app.dialog = Some(Dialog::Rename {
+                path: path.clone(),
+                text: format!("m{i}"),
+                error: None,
+            });
+            app.confirm();
+            assert!(!path.exists(), "the rename landed");
+        }
+        assert_eq!(app.undo.len(), 20, "oldest entries fall off");
+    }
+
+    #[test]
+    fn undo_and_redo_a_rename() {
+        let dir = std::env::temp_dir().join(format!("ferry-undo-rename-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.txt"), "x").unwrap();
+        let ctx = egui::Context::default();
+        let mut app = App::new(&ctx, dir.clone(), None);
+        settle(&ctx, &mut app);
+
+        app.dialog = Some(Dialog::Rename {
+            path: dir.join("a.txt"),
+            // A real user edits the pre-filled name and keeps the extension.
+            text: "b.txt".into(),
+            error: None,
+        });
+        app.confirm();
+        assert!(dir.join("b.txt").exists());
+
+        app.apply(Action::Undo);
+        settle(&ctx, &mut app);
+        assert!(dir.join("a.txt").exists());
+        assert!(!dir.join("b.txt").exists());
+
+        app.apply(Action::Redo);
+        settle(&ctx, &mut app);
+        assert!(dir.join("b.txt").exists());
+        assert!(!dir.join("a.txt").exists());
+    }
+
+    #[test]
+    fn undo_and_redo_a_new_folder() {
+        let dir = std::env::temp_dir().join(format!("ferry-undo-folder-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let ctx = egui::Context::default();
+        let mut app = App::new(&ctx, dir.clone(), None);
+        settle(&ctx, &mut app);
+
+        app.dialog = Some(Dialog::NewFolder {
+            text: "fresh".into(),
+            error: None,
+        });
+        app.confirm();
+        assert!(dir.join("fresh").is_dir());
+
+        // Undo removes it; redo makes it again.
+        app.apply(Action::Undo);
+        settle(&ctx, &mut app);
+        assert!(!dir.join("fresh").exists());
+        app.apply(Action::Redo);
+        settle(&ctx, &mut app);
+        assert!(dir.join("fresh").is_dir());
+
+        // A folder that is no longer empty refuses the undo and keeps its contents.
+        std::fs::write(dir.join("fresh/kept.txt"), "k").unwrap();
+        app.apply(Action::Undo);
+        settle(&ctx, &mut app);
+        assert!(dir.join("fresh/kept.txt").exists());
+        assert!(app.status.is_some());
+    }
+
+    #[test]
+    fn undo_and_redo_a_new_file() {
+        let dir = std::env::temp_dir().join(format!("ferry-undo-file-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let ctx = egui::Context::default();
+        let mut app = App::new(&ctx, dir.clone(), None);
+        settle(&ctx, &mut app);
+
+        app.dialog = Some(Dialog::NewFile {
+            text: "note.txt".into(),
+            error: None,
+        });
+        app.confirm();
+        assert!(dir.join("note.txt").exists());
+        // The editor the New File opened is still there; close it before going on.
+        assert!(app.editor.is_some());
+        app.close_editor();
+
+        app.apply(Action::Undo);
+        settle(&ctx, &mut app);
+        assert!(!dir.join("note.txt").exists());
+        app.apply(Action::Redo);
+        settle(&ctx, &mut app);
+        assert!(dir.join("note.txt").exists());
+    }
+
+    #[test]
+    fn undo_and_redo_a_copy() {
+        let dir = std::env::temp_dir().join(format!("ferry-undo-copy-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::create_dir_all(dir.join("dst")).unwrap();
+        std::fs::write(dir.join("src/f.txt"), "f").unwrap();
+        let ctx = egui::Context::default();
+        let mut app = App::new(&ctx, dir.clone(), None);
+        settle(&ctx, &mut app);
+
+        // Copy src/f.txt into dst/: the original stays.
+        app.apply(Action::Go(dir.join("src")));
+        settle(&ctx, &mut app);
+        app.apply(Action::SelectAll);
+        app.apply(Action::Copy);
+        app.apply(Action::Go(dir.join("dst")));
+        settle(&ctx, &mut app);
+        app.apply(Action::Paste);
+        settle(&ctx, &mut app);
+        assert!(dir.join("src/f.txt").exists());
+        assert!(dir.join("dst/f.txt").exists());
+
+        // Undo deletes the copy; redo re-copies it.
+        app.apply(Action::Undo);
+        settle(&ctx, &mut app);
+        assert!(dir.join("src/f.txt").exists());
+        assert!(!dir.join("dst/f.txt").exists());
+        app.apply(Action::Redo);
+        settle(&ctx, &mut app);
+        assert!(dir.join("dst/f.txt").exists());
+    }
+
+    #[test]
+    fn a_new_operation_clears_redo() {
+        let dir = std::env::temp_dir().join(format!("ferry-undo-redo-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for i in 0..2 {
+            std::fs::write(dir.join(format!("n{i}.txt")), "x").unwrap();
+        }
+        let ctx = egui::Context::default();
+        let mut app = App::new(&ctx, dir.clone(), None);
+        settle(&ctx, &mut app);
+
+        for i in 0..2 {
+            app.dialog = Some(Dialog::Rename {
+                path: dir.join(format!("n{i}.txt")),
+                text: format!("m{i}"),
+                error: None,
+            });
+            app.confirm();
+        }
+        app.apply(Action::Undo);
+        settle(&ctx, &mut app);
+        assert!(!app.redo.is_empty());
+
+        // A fresh operation clears the redo stack.
+        app.dialog = Some(Dialog::NewFolder {
+            text: "fresh".into(),
+            error: None,
+        });
+        app.confirm();
+        assert!(app.redo.is_empty());
     }
 }

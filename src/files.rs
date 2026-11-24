@@ -141,8 +141,14 @@ pub fn unique_name(dir: &Path, name: &str) -> PathBuf {
 }
 
 /// Copies or moves `sources` into `dir` with coreutils, renaming on a clash instead of overwriting.
-pub fn paste(sources: &[PathBuf], dir: &Path, cut: bool) -> Result<usize, String> {
-    let mut done = 0;
+/// Returns the (source, actual destination) pairs it made: the destinations are the truth for
+/// undo, since a clash gets a new name through unique_name.
+pub fn paste(
+    sources: &[PathBuf],
+    dir: &Path,
+    cut: bool,
+) -> Result<Vec<(PathBuf, PathBuf)>, String> {
+    let mut done = Vec::new();
     for src in sources {
         let Some(name) = src.file_name() else {
             continue;
@@ -164,9 +170,23 @@ pub fn paste(sources: &[PathBuf], dir: &Path, cut: bool) -> Result<usize, String
         if !out.status.success() {
             return Err(String::from_utf8_lossy(&out.stderr).trim().to_owned());
         }
-        done += 1;
+        done.push((src.clone(), dest));
     }
     Ok(done)
+}
+
+/// Moves a trashed path back to where it was, the inverse of `trash`.
+pub fn restore(path: &Path) -> Result<(), String> {
+    let out = Command::new("gio")
+        .args(["trash", "restore", "--"])
+        .arg(path)
+        .output()
+        .map_err(|e| format!("gio: {e}"))?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).trim().to_owned())
+    }
 }
 
 /// Moves files to the freedesktop trash, where the desktop's other tools can restore them.
@@ -511,9 +531,16 @@ mod tests {
         let sub = dir.join("sub");
         fs::create_dir(&sub).unwrap();
         fs::write(dir.join("a.txt"), "x").unwrap();
-        assert_eq!(paste(&[dir.join("a.txt")], &dir, false), Ok(1));
+        let a = dir.join("a.txt");
+        assert_eq!(
+            paste(std::slice::from_ref(&a), &dir, false).unwrap(),
+            [(a.clone(), dir.join("a (1).txt"))]
+        );
         assert!(dir.join("a (1).txt").exists());
-        assert_eq!(paste(&[dir.join("a.txt")], &sub, true), Ok(1));
+        assert_eq!(
+            paste(std::slice::from_ref(&a), &sub, true).unwrap(),
+            [(a, sub.join("a.txt"))]
+        );
         assert!(sub.join("a.txt").exists() && !dir.join("a.txt").exists());
         assert!(paste(std::slice::from_ref(&dir), &sub, false).is_err());
     }
