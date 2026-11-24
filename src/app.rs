@@ -125,8 +125,8 @@ enum Action {
     Terminal,
     /// Open a new tab in the active pane's folder.
     NewTab,
-    /// Close the active tab (quitting when it is the last one).
-    CloseTab,
+    /// Close the tab at this index (quitting when it is the last one).
+    CloseTab(usize),
     /// Move to the next or previous tab.
     NextTab,
     PrevTab,
@@ -1811,15 +1811,19 @@ impl App {
                 // Re-read the folder so the new tab shows its contents.
                 self.load(cwd, None, false, true);
             }
-            Action::CloseTab => {
+            Action::CloseTab(i) => {
                 if self.tabs.len() == 1 {
                     return self.quit();
                 }
-                let i = self.active_tab;
                 self.tabs.remove(i);
-                // The neighbour that takes its place is the next tab, or the previous one when
-                // the last was closed.
-                self.active_tab = (i + 1).min(self.tabs.len() - 1);
+                if i == self.active_tab {
+                    // The neighbour that takes its place is the next tab, or the previous one
+                    // when the last was closed.
+                    self.active_tab = (i + 1).min(self.tabs.len() - 1);
+                } else if i < self.active_tab {
+                    // Closing a tab before it shifts the active one down by one.
+                    self.active_tab -= 1;
+                }
                 self.load(self.cwd.clone(), None, false, true);
             }
             Action::NextTab => {
@@ -2245,7 +2249,7 @@ impl App {
                         Key::F if m.command && m.shift => self.pending.push(Action::Search),
                         Key::F | Key::I if m.command => self.focus_filter = true,
                         Key::T if m.ctrl => self.pending.push(Action::NewTab),
-                        Key::W if m.ctrl => self.pending.push(Action::CloseTab),
+                        Key::W if m.ctrl => self.pending.push(Action::CloseTab(self.active_tab)),
                         Key::Tab if m.ctrl && !m.shift => self.pending.push(Action::NextTab),
                         Key::Tab if m.ctrl && m.shift => self.pending.push(Action::PrevTab),
                         _ => {}
@@ -2522,7 +2526,7 @@ impl App {
         let p = self.p();
         // Decide what was clicked first: drawing borrows `self.tabs`, so acting has to wait.
         let mut switch_to: Option<usize> = None;
-        let mut close_clicked = false;
+        let mut close_at: Option<usize> = None;
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 4.0;
             for (i, pane) in self.tabs.iter().enumerate() {
@@ -2555,13 +2559,13 @@ impl App {
                         .on_hover_cursor(CursorIcon::PointingHand)
                         .clicked()
                     {
-                        close_clicked = true;
+                        close_at = Some(i);
                     }
                 });
             }
         });
-        if close_clicked {
-            self.pending.push(Action::CloseTab);
+        if let Some(i) = close_at {
+            self.pending.push(Action::CloseTab(i));
         } else if let Some(i) = switch_to.filter(|&i| i != self.active_tab) {
             self.active_tab = i;
             self.load(self.cwd.clone(), None, false, true);
@@ -5335,12 +5339,12 @@ mod tabs_tests {
         assert_eq!(app.cwd, dir);
 
         // Closing a tab switches to its neighbour; closing the last one quits.
-        app.apply(Action::CloseTab);
+        app.apply(Action::CloseTab(app.active_tab));
         assert_eq!(app.tabs.len(), 1);
         assert!(!app.allow_close);
         app.apply(Action::Go(dir.join("b")));
         settle(&ctx, &mut app);
-        app.apply(Action::CloseTab);
+        app.apply(Action::CloseTab(app.active_tab));
         assert!(app.allow_close);
     }
 }
