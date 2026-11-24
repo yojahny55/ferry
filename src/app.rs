@@ -934,21 +934,14 @@ impl App {
         }
         self.active_tab = was_tab;
         self.active_pane = was_pane;
-        let name = match load.pane {
-            PaneId::Tab(i) => &self.tabs[i].cwd,
-            PaneId::Split => self
-                .split
-                .as_ref()
-                .expect("the split pane exists")
-                .cwd
-                .as_path(),
+        // The title names what is on screen: a background pane's load must not overwrite it.
+        let visible = match load.pane {
+            PaneId::Tab(i) => i == self.active_tab && !self.active_pane,
+            PaneId::Split => self.active_pane,
         };
-        let name = name
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "/".into());
-        self.ctx
-            .send_viewport_cmd(egui::ViewportCommand::Title(format!("{name} — Ferry")));
+        if visible {
+            self.folder_title();
+        }
     }
 
     fn folder_title(&self) {
@@ -1443,11 +1436,19 @@ impl App {
 
     /// A paste's own report-back: the pairs it made travel with the result so the Op can be
     /// recorded on the UI thread.
-    fn paste_job(&mut self, label: String, paths: Vec<PathBuf>, dir: PathBuf, cut: bool) {
+    fn paste_job(
+        &mut self,
+        label: String,
+        paths: Vec<PathBuf>,
+        dir: PathBuf,
+        cut: bool,
+        dest_pane: bool,
+    ) {
         self.busy += 1;
         self.status = Some((label, false));
         let (tx, ctx) = (self.tx.clone(), self.ctx.clone());
-        let pane = if self.active_pane && self.split.is_some() {
+        // The refresh follows the destination pane, not the one that was active when pasting.
+        let pane = if dest_pane {
             PaneId::Split
         } else {
             PaneId::Tab(self.active_tab)
@@ -2746,7 +2747,13 @@ impl App {
     }
 
     fn paste(&mut self, paths: Vec<PathBuf>, cut: bool) {
-        let dir = self.cwd.clone();
+        // With the split on and no explicit destination, the active pane is the source and the
+        // other one the destination; otherwise it lands in the active pane's own folder.
+        let (dir, dest_pane) = match (self.split.as_ref(), self.active_pane) {
+            (_, true) => (self.cwd.clone(), false),
+            (Some(split), false) => (split.cwd.clone(), true),
+            (None, false) => (self.cwd.clone(), false),
+        };
         if cut {
             self.clip = None;
         }
@@ -2755,7 +2762,7 @@ impl App {
         } else {
             tr("Copying…")
         };
-        self.paste_job(label, paths, dir, cut);
+        self.paste_job(label, paths, dir, cut, dest_pane);
     }
 
     // ----- Input ---------------------------------------------------------------------------
@@ -4541,11 +4548,14 @@ impl App {
                     PaneId::Split if self.split.is_some() => (0, true),
                     _ => (self.active_tab, self.active_pane && self.split.is_some()),
                 };
-                let (was_tab, was_pane) = match target {
-                    (i, false) => (std::mem::replace(&mut self.active_tab, i), false),
-                    (_, true) => (0, std::mem::replace(&mut self.active_pane, true)),
-                };
+                let was_tab = self.active_tab;
+                let was_pane = self.active_pane;
+                match target {
+                    (i, false) => self.active_tab = i,
+                    (_, true) => self.active_pane = true,
+                }
                 self.refresh();
+                // The refresh only borrows the target pane: activity stays where it was.
                 self.active_tab = was_tab;
                 self.active_pane = was_pane;
                 // A finished paste reports what it did; its Op is recorded here, on the UI thread.
@@ -6175,6 +6185,57 @@ mod split_tests {
         assert!(app.split.is_none());
         assert!(!app.active_pane);
         assert_eq!(app.cwd, dir);
+    }
+
+    #[test]
+    fn paste_goes_to_the_other_pane() {
+        let dir = std::env::temp_dir().join(format!("ferry-split-paste-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("a")).unwrap();
+        std::fs::create_dir_all(dir.join("b")).unwrap();
+        std::fs::write(dir.join("a/f.txt"), "f").unwrap();
+        let ctx = egui::Context::default();
+        let mut app = App::new(&ctx, dir.clone(), None);
+        settle(&ctx, &mut app);
+
+        // Split; the left pane shows a/, the right b/.
+        app.apply(Action::ToggleSplit);
+        app.apply(Action::Go(dir.join("a")));
+        settle(&ctx, &mut app);
+        app.apply(Action::SwitchPane);
+        app.apply(Action::Go(dir.join("b")));
+        settle(&ctx, &mut app);
+
+        // Copy in the left pane…
+        app.apply(Action::SwitchPane);
+        app.apply(Action::SelectAll);
+        app.apply(Action::Copy);
+
+        // …and paste with the right pane active: it lands in b/, not a/.
+        app.apply(Action::SwitchPane);
+        app.apply(Action::Paste);
+        settle(&ctx, &mut app);
+        assert!(
+            dir.join("b/f.txt").exists(),
+            "the copy landed in the other pane"
+        );
+        assert!(
+            dir.join("a/f.txt").exists(),
+            "a copy leaves its source behind"
+        );
+
+        // A cut pasted from the left lands in the right too.
+        app.apply(Action::SwitchPane);
+        app.apply(Action::SelectAll);
+        app.apply(Action::Cut);
+        app.apply(Action::SwitchPane);
+        app.apply(Action::Paste);
+        settle(&ctx, &mut app);
+        assert!(
+            dir.join("b/f (1).txt").exists(),
+            "the move landed in the other pane"
+        );
+        assert!(!dir.join("a/f.txt").exists());
     }
 }
 
