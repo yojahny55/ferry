@@ -12,6 +12,12 @@ All notable changes to Ferry are documented here. The format follows
   Ctrl+Tab and Ctrl+Shift+Tab move between them. A tab strip appears once there are two or more;
   each tab shows its folder, clicking switches to it, and its × closes it. Alt+X opens a terminal
   in the active pane's folder, like F4.
+- Split view: F3 splits the window into two side-by-side panes that browse independently (one
+  shared sidebar), F6 switches between them, F3 again closes it. With no destination given, a
+  copy or move goes from the active pane to the other one.
+- Undo and redo: Ctrl+Z and Ctrl+Shift+Z reverse moves, copies, renames, new folders and files,
+  and deletes to the trash (up to 20 steps). A reversal is refused with a message when it would
+  overwrite something or its item is gone; permanent deletes can't be undone.
 
 ## [0.3.1] - 2026-11-23
 

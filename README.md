@@ -179,12 +179,15 @@ Press `?` in the app for this list.
 | Ctrl+Shift+N | New folder |
 | Ctrl+Alt+N | New text file |
 | Ctrl+D | Bookmark the selected folders, or this one |
+| Ctrl+Z / Ctrl+Shift+Z | Undo, redo (move, copy, rename, new folder or file, delete to trash) |
 | Ctrl+A | Select all |
 | Ctrl+H | Show hidden files |
 | Ctrl+1 / Ctrl+2 | Details or icons |
 | Ctrl+Wheel, Ctrl++ / Ctrl+- | Zoom the current view |
 | Ctrl+0 | Reset zoom |
-| F4 | Open a terminal here |
+| Ctrl+T / Ctrl+W | New tab, close the current one (Ctrl+Tab / Ctrl+Shift+Tab switch) |
+| F3 | Split the view in two panes, or close it (F6 switches between them) |
+| F4 | Open a terminal here (Alt+X too) |
 | F5 | Refresh |
 | Alt+Enter | Properties |
 | ? | Keyboard shortcuts |
@@ -217,7 +220,7 @@ single JSON file; see [CONTRIBUTING.md](CONTRIBUTING.md#translations).
 ## Known limitations
 
 - Dropping files *into* Ferry from other apps isn't supported yet.
-- No tabs, split view, or undo yet.
+- Tabs and the split view don't survive a restart; undo history is per session too.
 - Right-to-left languages aren't laid out right to left yet.
 - *Open with…* (choosing among apps) and file properties aren't there yet.
 - The text editor has no replace or go-to-line yet, edits files up to 5 MiB, and highlights
