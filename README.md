@@ -36,6 +36,12 @@ background so a sleeping NAS never freezes the window, and the app starts instan
   WCAG AA contrast, since many themes' dark foregrounds are too faint to read.
 - **Appearance menu** (the sliders icon) to set size and transparency yourself instead.
 - **Details and icons views**, with sortable columns and natural ordering (`photo2` before `photo10`).
+- **Tabs and a split view**: Ctrl+T opens a tab, F3 splits the window into two panes that
+  browse on their own (F6 or a click switches between them), and a copy or move with no
+  destination goes from one pane to the other.
+- **Undo** (Ctrl+Z) for moves, copies, renames, new files and folders, and deletes to the trash.
+- **Show in folder** from your browser's downloads (or any app that asks the desktop's file
+  manager) opens Ferry with the file selected.
 - **Zoom** with Ctrl+wheel or Ctrl+±, kept separately for each view and remembered.
 - **Previews** of images, videos, PDFs and office files, read from and written to the shared
   freedesktop thumbnail cache, so previews other apps already made appear instantly.
@@ -220,9 +226,10 @@ single JSON file; see [CONTRIBUTING.md](CONTRIBUTING.md#translations).
 ## Known limitations
 
 - Dropping files *into* Ferry from other apps isn't supported yet.
-- Tabs and the split view don't survive a restart; undo history is per session too.
+- Open tabs and the split view aren't restored when Ferry restarts, and undo history lasts one
+  session.
 - Right-to-left languages aren't laid out right to left yet.
-- *Open with…* (choosing among apps) and file properties aren't there yet.
+- *Open with…* (choosing among apps) isn't there yet; files open in their default app.
 - The text editor has no replace or go-to-line yet, edits files up to 5 MiB, and highlights
   files up to 256 KiB. Links in the Markdown preview aren't clickable, and images show their
   description.
