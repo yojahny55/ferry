@@ -6,6 +6,8 @@ All notable changes to Ferry are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-24
+
 ### Fixed
 
 - The active tab no longer has a line drawn across its name, and the tab's × sits centered on
@@ -135,7 +137,8 @@ The first release.
 - Background folder loading, so slow or unreachable network mounts never freeze the window.
 - `FERRY_DEBUG=1` logging for drags, thumbnails and settings.
 
-[Unreleased]: https://github.com/yojahny55/ferry/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/yojahny55/ferry/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/yojahny55/ferry/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/yojahny55/ferry/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/yojahny55/ferry/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/yojahny55/ferry/compare/v0.2.0...v0.2.1
