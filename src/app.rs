@@ -395,6 +395,8 @@ pub struct App {
     split: Option<Pane>,
     /// Which pane gets keys and clicks: false is the left (tab) pane, true the right one.
     active_pane: bool,
+    /// Set by `folder` when its background is clicked in split mode; consumed by `split_view`.
+    clicked_pane: Option<bool>,
     places: Vec<(String, PathBuf, char)>,
     bookmarks: Vec<(String, PathBuf)>,
     bookmarks_file: PathBuf,
@@ -495,6 +497,7 @@ impl App {
             active_tab: 0,
             split: None,
             active_pane: false,
+            clicked_pane: None,
             places: files::places(),
             bookmarks: files::bookmarks(&files::bookmarks_file()),
             bookmarks_file: files::bookmarks_file(),
@@ -3547,27 +3550,42 @@ impl App {
     fn folder(&mut self, ui: &mut Ui) {
         let p = self.p();
         // The width is shared state (grid columns fit it); in the split view each half keeps its
-        // own, keyed by which half this call draws — the right one only while it is active.
+        // own. `split_view` passes the half's rect down; otherwise it is the whole central panel.
         let key = if self.active_pane && self.split.is_some() {
             "ferry-width-right"
         } else {
             "ferry-width-left"
         };
+        // The half's rect comes down from `split_view`; without it the whole central panel.
+        let half = ui
+            .ctx()
+            .data_mut(|d| d.get_temp::<Rect>(egui::Id::unique("ferry-half")));
+        let width = half.map_or(ui.available_width(), |r| r.width());
         ui.ctx()
-            .data_mut(|d| d.insert_temp(egui::Id::unique(key), ui.available_width()));
+            .data_mut(|d| d.insert_temp(egui::Id::unique(key), width));
         // The background sits under the files: clicking it clears the selection, right-clicking
         // it offers what can be done in the folder itself. In the split view a click also makes
         // this half the active pane — the only interaction that reaches it (the halves overlap
-        // the parent's, so an earlier interact here would never report a click).
+        // the parent's, so an earlier interact here would never report a click). The rect is
+        // clamped to the half: `available_rect_before_wrap` ignores the scope's max width.
+        //
+        // The background id is derived from the ui's scope, which is unique per half in split
+        // mode (each half gets its own child ui) and stable in single-pane mode. This keeps the
+        // two halves' backgrounds as separate widgets and lets the single-pane one be replaced
+        // when the view switches.
         let background = ui.interact(
-            ui.available_rect_before_wrap(),
+            half.unwrap_or_else(|| {
+                Rect::from_min_size(ui.cursor().min, vec2(width, ui.available_height()))
+            }),
             ui.scope_id().with("background"),
             Sense::click(),
         );
         if background.clicked() {
             self.selected.clear();
-            if self.split.is_some() && !self.active_pane {
-                self.active_pane = true;
+            // In split mode, record which pane was clicked so `split_view` can activate it.
+            // `active_pane` is forced to the half being rendered, so we can't check it here.
+            if self.split.is_some() {
+                self.clicked_pane = Some(self.active_pane);
             }
         }
         background.context_menu(|ui| self.folder_menu(ui));
@@ -3623,18 +3641,32 @@ impl App {
             // `folder` reads through DerefMut, so force the half's own pane for its duration.
             let was = std::mem::replace(&mut self.active_pane, is_split);
             ui.allocate_space(rect.size());
-            // A different scope id per half: the scroll areas stay independent.
-            ui.scope_builder(
+            // The scope only clamps its max rect — it does not move the cursor to the half — so
+            // `folder` gets a child ui that starts at the half's own min. The half's rect is
+            // passed down for the column math and the background click; each half also pushes
+            // its own id salt in `folder`, keeping the two backgrounds (and the single-pane one
+            // they replace) as separate widgets so a stale giant one can't steal a press.
+            let id_salt = if is_split {
+                "split-right"
+            } else {
+                "split-left"
+            };
+            let mut inner = ui.new_child(
                 egui::UiBuilder::new()
-                    .id_salt(if is_split {
-                        "split-right"
-                    } else {
-                        "split-left"
-                    })
-                    .max_rect(rect),
-                |ui| self.folder(ui),
+                    .id_salt(id_salt)
+                    .max_rect(rect)
+                    .layout(egui::Layout::top_down(egui::Align::LEFT)),
             );
+            inner.ctx().data_mut(|d| {
+                d.insert_temp(egui::Id::unique("ferry-half"), rect);
+            });
+            self.folder(&mut inner);
             self.active_pane = was;
+        }
+        // `folder` records which half's background was clicked (its own forced pane). Apply it
+        // after both halves are drawn, so the next frame highlights the newly active one.
+        if let Some(pane) = self.clicked_pane.take() {
+            self.active_pane = pane;
         }
     }
 
@@ -6174,16 +6206,47 @@ mod tabs_tests {
 #[cfg(test)]
 mod split_tests {
     use super::*;
+    use egui::{PointerButton, Pos2, RawInput};
 
     fn settle(ctx: &egui::Context, app: &mut App) {
         for _ in 0..30 {
             std::thread::sleep(Duration::from_millis(10));
-            let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let input = RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1000.0, 600.0))),
+                ..Default::default()
+            };
+            let mut out = ctx.run_ui(input, |ui| {
                 app.poll(ui.ctx());
                 app.draw(ui);
             });
             out.textures_delta.clear();
         }
+    }
+
+    fn frame(ctx: &egui::Context, app: &mut App, events: Vec<Event>) {
+        let input = RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1000.0, 600.0))),
+            events,
+            ..Default::default()
+        };
+        let mut out = ctx.run_ui(input, |ui| {
+            app.poll(ui.ctx());
+            app.draw(ui);
+        });
+        out.textures_delta.clear();
+    }
+
+    fn pointer(pos: Pos2, pressed: Option<bool>) -> Vec<Event> {
+        let mut events = vec![Event::PointerMoved(pos)];
+        if let Some(pressed) = pressed {
+            events.push(Event::PointerButton {
+                pos,
+                button: PointerButton::Primary,
+                pressed,
+                modifiers: Modifiers::NONE,
+            });
+        }
+        events
     }
 
     #[test]
@@ -6219,6 +6282,37 @@ mod split_tests {
         assert!(app.split.is_none());
         assert!(!app.active_pane);
         assert_eq!(app.cwd, dir);
+    }
+
+    #[test]
+    fn clicking_a_split_pane_makes_it_active() {
+        let dir = std::env::temp_dir().join(format!("ferry-split-click-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("a")).unwrap();
+        std::fs::write(dir.join("a/f.txt"), "f").unwrap();
+        let ctx = egui::Context::default();
+        let mut app = App::new(&ctx, dir.clone(), None);
+        settle(&ctx, &mut app);
+
+        // F3 opens the split; both halves start on the same folder, left active.
+        app.apply(Action::ToggleSplit);
+        assert!(!app.active_pane);
+        // Let the new half widgets settle into egui's previous pass so clicks hit them.
+        settle(&ctx, &mut app);
+
+        // A click in the right half's empty space makes it the active pane.
+        let events = pointer(egui::Pos2::new(750.0, 300.0), Some(true));
+        frame(&ctx, &mut app, events);
+        let events = pointer(egui::Pos2::new(750.0, 300.0), Some(false));
+        frame(&ctx, &mut app, events);
+        assert!(app.active_pane, "clicking the right half activates it");
+
+        // And a click in the left half's empty space takes activity back.
+        let events = pointer(egui::Pos2::new(350.0, 300.0), Some(true));
+        frame(&ctx, &mut app, events);
+        let events = pointer(egui::Pos2::new(350.0, 300.0), Some(false));
+        frame(&ctx, &mut app, events);
+        assert!(!app.active_pane, "clicking the left half activates it");
     }
 
     #[test]

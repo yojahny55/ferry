@@ -6,6 +6,11 @@ All notable changes to Ferry are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- Clicking a split pane's empty space now makes it the active one (F6 already did; the mouse
+  didn't). Each half also keeps its own grid column width instead of sharing one.
+
 ### Added
 
 - Tabs: Ctrl+T opens one in the current folder, Ctrl+W closes it (quitting when it is the last),
