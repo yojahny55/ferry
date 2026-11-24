@@ -152,6 +152,7 @@ struct Dragged {
 
 /// A folder read on a background thread.
 struct Load {
+    pane: usize,
     generation: u64,
     path: PathBuf,
     select: Option<PathBuf>,
@@ -242,6 +243,12 @@ pub struct Pane {
     scroll_to_cursor: bool,
     viewport: (f32, f32),
     jump: (String, f64),
+    /// Bumped on every load of this pane; a result carrying an older number is stale.
+    load_gen: u64,
+    /// The path being read for this pane right now, shown in the status bar.
+    loading: Option<PathBuf>,
+    /// A once-a-second look at the folder is already running.
+    checking: bool,
 }
 
 impl Pane {
@@ -269,6 +276,9 @@ impl Pane {
             scroll_to_cursor: false,
             viewport: (0.0, 0.0),
             jump: (String::new(), 0.0),
+            load_gen: 0,
+            loading: None,
+            checking: false,
         }
     }
 }
@@ -370,9 +380,6 @@ pub struct App {
     pending: Vec<Action>,
     load_tx: Sender<Loaded>,
     load_rx: Receiver<Loaded>,
-    load_gen: u64,
-    loading: Option<PathBuf>,
-    checking: bool,
     dnd: Option<crate::dnd::Dnd>,
     /// Set when a drag left for another app: egui never sees that button release.
     release_pointer: bool,
@@ -444,9 +451,6 @@ impl App {
             pending: Vec::new(),
             load_tx,
             load_rx,
-            load_gen: 0,
-            loading: None,
-            checking: false,
             dnd: None,
             release_pointer: false,
             thumbs: crate::thumbs::Thumbs::new(ctx),
@@ -700,6 +704,7 @@ impl App {
     /// autofs blocks until it answers), and the window must keep drawing meanwhile. Only the
     /// newest request is applied, so clicking on while a slow folder loads just moves on.
     fn load(&mut self, path: PathBuf, select: Option<PathBuf>, history: bool, fresh: bool) {
+        let pane = self.active_tab;
         self.load_gen += 1;
         let generation = self.load_gen;
         if fresh {
@@ -718,6 +723,7 @@ impl App {
             });
             let (mtime, free) = (mtime(&path), files::free_space(&path));
             let _ = tx.send(Loaded::Dir(Load {
+                pane,
                 generation,
                 path,
                 select,
@@ -732,10 +738,13 @@ impl App {
     }
 
     fn loaded(&mut self, load: Load) {
-        if load.generation != self.load_gen {
+        // Route by the pane that started the load. A closed pane is dropped; a generation
+        // mismatch means a newer load of that same pane superseded this one — both silently.
+        let i = load.pane;
+        if i >= self.tabs.len() || self.tabs[i].load_gen != load.generation {
             return;
         }
-        self.loading = None;
+        self.tabs[i].loading = None;
         let entries = match load.result {
             Ok(entries) => entries,
             // Asked to open a file: show its folder with the file selected.
@@ -756,11 +765,14 @@ impl App {
             }
             Err(e) => return self.error(format!("{}: {e}", load.path.display())),
         };
-        self.dir_mtime = load.mtime;
-        self.free = load.free;
+        self.tabs[i].dir_mtime = load.mtime;
+        self.tabs[i].free = load.free;
         if load.fresh {
             self.thumbs.clear();
         }
+        // The helpers below take `&mut App` and reach the active tab through Deref, so they are
+        // called on `self` with the routing index stashed in the active slot for their duration.
+        let was_active = std::mem::replace(&mut self.active_tab, i);
         if !load.fresh {
             let cursor = self.cursor_entry().map(|e| e.path.clone());
             self.entries = entries;
@@ -771,32 +783,33 @@ impl App {
             if let Some(path) = load.select {
                 self.select_path(&path);
             }
-            return;
-        }
-        let path = load.path;
-        let select = load.select;
-        if load.history && path != self.cwd {
-            // Both fields live on the Pane; one borrow of it keeps them apart.
-            let pane = &mut self.tabs[self.active_tab];
-            pane.back.push(std::mem::replace(&mut pane.cwd, path));
-            pane.forward.clear();
         } else {
-            self.cwd = path;
+            let path = load.path;
+            let select = load.select;
+            if load.history && path != self.cwd {
+                // Both fields live on the Pane; one borrow of it keeps them apart.
+                let pane = &mut self.tabs[self.active_tab];
+                pane.back.push(std::mem::replace(&mut pane.cwd, path));
+                pane.forward.clear();
+            } else {
+                self.cwd = path;
+            }
+            self.entries = entries;
+            self.selected.clear();
+            self.filter.clear();
+            self.path_edit = None;
+            self.status = None;
+            self.rebuild_view();
+            self.cursor = None;
+            match select {
+                Some(p) => self.select_path(&p),
+                None => self.cursor = (!self.view.is_empty()).then_some(0),
+            }
+            self.viewport.0 = 0.0;
+            self.scroll_to_cursor = true;
         }
-        self.entries = entries;
-        self.selected.clear();
-        self.filter.clear();
-        self.path_edit = None;
-        self.status = None;
-        self.rebuild_view();
-        self.cursor = None;
-        match select {
-            Some(p) => self.select_path(&p),
-            None => self.cursor = (!self.view.is_empty()).then_some(0),
-        }
-        self.viewport.0 = 0.0;
-        self.scroll_to_cursor = true;
-        let name = self
+        self.active_tab = was_active;
+        let name = self.tabs[i]
             .cwd
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
@@ -3986,11 +3999,21 @@ impl App {
                 } => self.text_loaded(path, forced, result),
                 Loaded::Saved { path, text, result } => self.text_saved(path, text, result),
                 Loaded::Check { path, mtime, free } => {
-                    self.checking = false;
-                    if path == self.cwd && self.loading.is_none() {
-                        self.free = free;
-                        if mtime != self.dir_mtime {
-                            self.refresh();
+                    // Route by path, like a finished load: the check belongs to the pane
+                    // showing that folder, and only if it is not loading one right now.
+                    if let Some(i) = self.tabs.iter().position(|t| t.cwd == path)
+                        && !self.tabs[i].loading.is_some()
+                    {
+                        let pane = &mut self.tabs[i];
+                        pane.checking = false;
+                        pane.free = free;
+                        if mtime != pane.dir_mtime {
+                            // `reload` takes `&mut App` and reaches the active tab through Deref,
+                            // so it is called on `self` with the routing index stashed in the
+                            // active slot for its duration.
+                            let was_active = std::mem::replace(&mut self.active_tab, i);
+                            self.reload(None);
+                            self.active_tab = was_active;
                         }
                     }
                 }
@@ -4014,14 +4037,17 @@ impl App {
                 self.language = language;
             }
             // Off the UI thread too: the shown folder may sit on a mount that stops answering.
-            if !self.checking && self.loading.is_none() {
-                self.checking = true;
-                let (tx, ctx, path) = (self.load_tx.clone(), ctx.clone(), self.cwd.clone());
-                std::thread::spawn(move || {
-                    let (mtime, free) = (mtime(&path), files::free_space(&path));
-                    let _ = tx.send(Loaded::Check { path, mtime, free });
-                    ctx.request_repaint();
-                });
+            // Every pane is watched, not just the active one; each skips while it checks or loads.
+            for pane in self.tabs.iter_mut() {
+                if !pane.checking && pane.loading.is_none() {
+                    pane.checking = true;
+                    let (tx, ctx, path) = (self.load_tx.clone(), ctx.clone(), pane.cwd.clone());
+                    std::thread::spawn(move || {
+                        let (mtime, free) = (mtime(&path), files::free_space(&path));
+                        let _ = tx.send(Loaded::Check { path, mtime, free });
+                        ctx.request_repaint();
+                    });
+                }
             }
             // lsblk is quick, but it's a program: off the UI thread like everything else.
             if !self.scanning_devices {
@@ -5346,5 +5372,34 @@ mod tabs_tests {
         settle(&ctx, &mut app);
         app.apply(Action::CloseTab(app.active_tab));
         assert!(app.allow_close);
+    }
+
+    #[test]
+    fn panes_load_independently() {
+        let dir = std::env::temp_dir().join(format!("ferry-tabload-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("a")).unwrap();
+        std::fs::create_dir_all(dir.join("b")).unwrap();
+        std::fs::write(dir.join("a/x.txt"), "x").unwrap();
+        let ctx = egui::Context::default();
+        let mut app = App::new(&ctx, dir.clone(), None);
+        settle(&ctx, &mut app);
+
+        app.apply(Action::NewTab);
+        // Tab 1 goes to b while tab 0 stays in the root.
+        app.apply(Action::Go(dir.join("b")));
+        settle(&ctx, &mut app);
+        assert_eq!(app.tabs[1].cwd, dir.join("b"));
+        assert!(!app.tabs[1].entries.iter().any(|e| e.name == "x.txt"));
+        assert_eq!(app.tabs[0].cwd, dir);
+
+        // Both panes show their own listing at the same time.
+        app.apply(Action::PrevTab);
+        let names: Vec<String> = app
+            .view
+            .iter()
+            .map(|&i| app.entries[i].name.clone())
+            .collect();
+        assert!(names.contains(&"a".to_string()) && names.contains(&"b".to_string()));
     }
 }
